@@ -1,6 +1,21 @@
+# macOS metadata
 .DS_Store
+
+# Build products and local dependency caches
 .build/
 .swiftpm/
-xcuserdata/
+/build/
 DerivedData/
+*.app/
+*.dSYM/
+*.xcarchive/
+*.xcresult/
+
+# Per-user Xcode state; keep shared schemes and Package.resolved in version control.
+xcuserdata/
 *.xcuserstate
+
+# Python helper bytecode
+__pycache__/
+*.pyc
+*.pyo
