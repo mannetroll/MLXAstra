@@ -12,10 +12,13 @@ public struct SimulationSnapshot {
 /// GPU pseudospectral incompressible Navier–Stokes on [0, 2π)².
 ///
 /// Own and call this object on one serial worker queue. No grid-sized data is
-/// copied to the CPU during evolution; only CFL and diagnostic scalars are read.
+/// copied to the CPU during evolution. CFL stays on the GPU; diagnostic scalars
+/// are read once at the end of each requested batch.
 public final class MLXTurbulenceSolver {
     private var configuration: SimulationConfiguration
     private var size = 0
+    // Spectral arrays use [kx, ky]. MLX's forward 2D real FFT already
+    // produces this contiguous storage, exposed through a zero-copy transpose.
     private var spectrum = MLXArray(Float(0))
     private var waveSquared = MLXArray(Float(0))
     private var mask = MLXArray(Float(0))
@@ -28,6 +31,8 @@ public final class MLXTurbulenceSolver {
     private var forcingB = MLXArray(Float(0))
     private var statistics = SimulationStatistics()
     private var lastSnapshot: SimulationSnapshot?
+    private var unforcedStep: (([MLXArray]) -> [MLXArray])!
+    private var forcedStep: (([MLXArray]) -> [MLXArray])!
     private let period: Float = 2 * .pi
 
     public init(configuration: SimulationConfiguration, seed: UInt64 = 42) {
@@ -40,7 +45,7 @@ public final class MLXTurbulenceSolver {
     public convenience init(configuration: SimulationConfiguration, vorticity: [Float]) {
         self.init(configuration: configuration)
         precondition(vorticity.count == size * size)
-        spectrum = rfft2(MLXArray(vorticity, [size, size])) * mask
+        spectrum = rfft2(MLXArray(vorticity, [size, size])).transposed() * mask
         spectrum.eval()
         lastSnapshot = nil
         _ = snapshot()
@@ -55,8 +60,8 @@ public final class MLXTurbulenceSolver {
         lastSnapshot = nil
         let n = size
         let half = n / 2 + 1
-        let kx = MLXArray((0..<half).map { Float($0) }, [1, half])
-        let ky = MLXArray((0..<n).map { Float($0 < n / 2 ? $0 : $0 - n) }, [n, 1])
+        let kx = MLXArray((0..<half).map { Float($0) }, [half, 1])
+        let ky = MLXArray((0..<n).map { Float($0 < n / 2 ? $0 : $0 - n) }, [1, n])
         waveSquared = kx * kx + ky * ky
         // Strict inequality is essential when N is divisible by three: keeping
         // the boundary modes would let quadratic products alias onto that edge.
@@ -64,29 +69,31 @@ public final class MLXTurbulenceSolver {
         for row in 0..<n {
             let waveY = row < n / 2 ? row : row - n
             for column in 0..<half where 3 * abs(waveY) < n && 3 * column < n {
-                if column != 0 || waveY != 0 { retained[row * half + column] = 1 }
+                if column != 0 || waveY != 0 { retained[column * n + row] = 1 }
             }
         }
-        mask = MLXArray(retained, [n, half])
+        mask = MLXArray(retained, [half, n])
         let imaginary = MLXArray(real: 0, imaginary: 1)
         let inverseLaplacian = mask / maximum(waveSquared, 1)
         // ω = ∂x v − ∂y u, u = ∂y ψ, v = −∂x ψ, −Δψ = ω.
         velocityX = imaginary * ky * inverseLaplacian
         velocityY = -imaginary * kx * inverseLaplacian
-        let derivativeX = imaginary * (kx + zeros([n, 1]))
-        let derivativeY = imaginary * (ky + zeros([1, half]))
+        let derivativeX = imaginary * (kx + zeros([1, n]))
+        let derivativeY = imaginary * (ky + zeros([half, 1]))
         derivatives = stacked([velocityX, velocityY, derivativeX, derivativeY])
         x = MLXArray((0..<n).map { period * Float($0) / Float(n) }, [1, n])
         y = MLXArray((0..<n).map { period * Float($0) / Float(n) }, [n, 1])
         var random = SplitMix64(state: seed)
         let initial = initialVorticity(configuration.preset, random: &random)
-        spectrum = rfft2(initial) * mask
+        spectrum = rfft2(initial).transposed() * mask
         let phase = random.unit() * period
         let force1 = sin(9 * x + 2 * y + phase) + sin(3 * x - 10 * y - phase)
         let force2 = cos(2 * x + 9 * y - phase) + cos(10 * x - 3 * y + phase)
-        forcingA = rfft2(force1) * mask
-        forcingB = rfft2(force2) * mask
+        forcingA = rfft2(force1).transposed() * mask
+        forcingB = rfft2(force2).transposed() * mask
         eval(spectrum, waveSquared, derivatives, forcingA, forcingB)
+        unforcedStep = makeCompiledStep(forced: false)
+        forcedStep = makeCompiledStep(forced: true)
         _ = snapshot()
     }
 
@@ -107,39 +114,30 @@ public final class MLXTurbulenceSolver {
                                        Swift.min(0.3, Swift.max(0, impulse.radius)) * period)
                 brush = brush + impulse.strength * gaussian(x: centerX, y: centerY, radius: radius)
             }
-            spectrum = (spectrum + rfft2(brush)) * mask
+            spectrum = (spectrum + rfft2(brush).transposed()) * mask
             lastSnapshot = nil
         }
         let timeScale = configuration.timeScale.isFinite ? Swift.max(0, configuration.timeScale) : 1
         let viscosity = configuration.viscosity.isFinite ? Swift.max(0, configuration.viscosity) : 0.00015
         let force = configuration.forcing.isFinite ? configuration.forcing : 0
-        for _ in 0..<Swift.max(0, steps) where timeScale > 0 {
-            // A single batched inverse transform gives velocity and gradients.
-            let physical = physicalDerivatives(spectrum)
-            let courantSpeed = MLX.max(MLX.abs(physical[0]) + MLX.abs(physical[1])).item(Float.self)
-            guard courantSpeed.isFinite else { break }
-            let dt = Swift.min(0.0125 * timeScale,
-                               0.45 * period / (Float(size) * Swift.max(courantSpeed, 0.05)))
-            let third = exp((-viscosity * dt / 3) * waveSquared)
-            let twoThirds = third * third
-            let full = twoThirds * third
-            let time = Float(statistics.time)
-            // Heun's third-order RK applied to the integrating-factor variable.
-            // All diffusion exponents are nonpositive, so viscosity imposes no
-            // extra stability restriction, even at the largest grid size.
-            let a = nonlinear(physical, time: time, forcing: force)
-            let stage1 = third * (spectrum + (dt / 3) * a)
-            let b = nonlinear(physicalDerivatives(stage1), time: time + dt / 3, forcing: force)
-            let stage2 = twoThirds * spectrum + (2 * dt / 3) * third * b
-            let c = nonlinear(physicalDerivatives(stage2), time: time + 2 * dt / 3, forcing: force)
-            spectrum = (full * (spectrum + (dt / 4) * a) + (3 * dt / 4) * third * c) * mask
-            // End the lazy graph every step, bounding memory over long runs.
-            spectrum.eval()
-            statistics.time += Double(dt)
-            statistics.step += 1
+        let stepCount = timeScale > 0 ? Swift.max(0, steps) : 0
+        // Changing controls are array inputs, so the compiled graph sees their
+        // current values without retracing or retaining old configuration.
+        let parameters = [MLXArray(Float(statistics.time)), MLXArray(viscosity),
+                          MLXArray(0.0125 * timeScale), MLXArray(force)]
+        var state = [spectrum, MLXArray(Float(0)), MLXArray(Int32(0))]
+        let step = force == 0 ? unforcedStep! : forcedStep!
+        for _ in 0..<stepCount {
+            state = step(state + parameters)
+            // Retire each step before encoding the next so large FFT buffers
+            // can be reused instead of accumulating across the batch.
+            eval(state)
+        }
+        if stepCount > 0 {
+            spectrum = state[0]
             lastSnapshot = nil
         }
-        let result = snapshot()
+        let result = makeSnapshot(elapsed: state[1], completed: state[2])
         statistics.solverMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1000
         let timed = SimulationSnapshot(field: result.field, statistics: statistics, gridSize: size)
         lastSnapshot = timed
@@ -147,13 +145,23 @@ public final class MLXTurbulenceSolver {
     }
 
     public func snapshot() -> SimulationSnapshot {
+        makeSnapshot()
+    }
+
+    private func makeSnapshot(elapsed: MLXArray? = nil,
+                              completed: MLXArray? = nil) -> SimulationSnapshot {
         if let lastSnapshot { return lastSnapshot }
         let spectra = stacked([spectrum, spectrum * velocityX, spectrum * velocityY])
-        let field = contiguous(irfft2(spectra, s: [size, size]).asType(.float32))
+        let field = contiguous(Self.inversePlanes(spectra, size: size))
         let speedSquared = field[1] * field[1] + field[2] * field[2]
         let diagnostics = stacked([0.5 * mean(speedSquared), 0.5 * mean(field[0] * field[0]),
                                    sqrt(MLX.max(speedSquared)), MLX.max(MLX.abs(field[0]))])
-        eval(field, diagnostics)
+        var evaluated = [field, diagnostics]
+        if let elapsed { evaluated.append(elapsed) }
+        if let completed { evaluated.append(completed) }
+        eval(evaluated)
+        if let elapsed { statistics.time += Double(elapsed.item(Float.self)) }
+        if let completed { statistics.step += Int(completed.item(Int32.self)) }
         let values = diagnostics.asArray(Float.self)
         statistics.energy = values[0]
         statistics.enstrophy = values[1]
@@ -165,17 +173,71 @@ public final class MLXTurbulenceSolver {
         return result
     }
 
-    private func physicalDerivatives(_ value: MLXArray) -> MLXArray {
-        irfft2(derivatives * value, s: [size, size])
+    /// Invert [plane, kx, ky] into [plane, y, x]. The y transform reads
+    /// contiguous rows. Moving the plane axis before the x transform makes
+    /// MLX's required transpose produce contiguous display planes directly.
+    private static func inversePlanes(_ spectra: MLXArray, size: Int) -> MLXArray {
+        let alongY = ifft(spectra, axis: 2)
+        let alongX = irfft(alongY.transposed(2, 0, 1), n: size, axis: 2)
+        return alongX.transposed(1, 0, 2)
     }
 
-    private func nonlinear(_ fields: MLXArray, time: Float, forcing: Float) -> MLXArray {
-        let advection = -(fields[0] * fields[2] + fields[1] * fields[3])
-        var result = rfft2(advection) * mask
-        if forcing != 0 {
-            result = result + forcing * (cos(time * 0.7) * forcingA + sin(time * 0.7) * forcingB)
+    private func makeCompiledStep(forced: Bool) -> ([MLXArray]) -> [MLXArray] {
+        // Capture only immutable operators. Reset creates new closures for the
+        // new grid/seed; evolving state and controls are explicit inputs.
+        let n = size
+        let operators = derivatives
+        let kSquared = waveSquared
+        let projection = mask
+        let forceA = forcingA
+        let forceB = forcingB
+        let courantNumerator = 0.45 * period / Float(n)
+        return MLX.compile { (input: [MLXArray]) -> [MLXArray] in
+            let omega = input[0]
+            let elapsed = input[1]
+            let completed = input[2]
+            let time = input[3] + elapsed
+            let viscosity = input[4]
+            let maximumStep = input[5]
+            let forcing = input[6]
+
+            func physical(_ value: MLXArray) -> MLXArray {
+                Self.inversePlanes(operators * value, size: n)
+            }
+            func nonlinear(_ fields: MLXArray, at time: MLXArray) -> MLXArray {
+                let advection = -(fields[0] * fields[2] + fields[1] * fields[3])
+                var result = rfft2(advection).transposed() * projection
+                if forced {
+                    let phase = time * 0.7
+                    result = result + forcing * (cos(phase) * forceA + sin(phase) * forceB)
+                }
+                return result
+            }
+
+            // The same CFL reduction and cap as before, without a scalar read
+            // and CPU/GPU round trip between the transform and RK stages.
+            let fields = physical(omega)
+            let speed = MLX.max(MLX.abs(fields[0]) + MLX.abs(fields[1]))
+            let valid = isFinite(speed)
+            let proposedStep = minimum(maximumStep, courantNumerator / maximum(speed, 0.05))
+            let dt = which(valid, proposedStep, 0)
+            let third = exp((-viscosity * dt / 3) * kSquared)
+            let twoThirds = third * third
+            let full = twoThirds * third
+
+            // Heun's third-order RK on the integrating-factor variable. Every
+            // diffusion exponent stays nonpositive, including at large grids.
+            let a = nonlinear(fields, at: time)
+            let stage1 = third * (omega + (dt / 3) * a)
+            let b = nonlinear(physical(stage1), at: time + dt / 3)
+            let stage2 = twoThirds * omega + (2 * dt / 3) * third * b
+            let c = nonlinear(physical(stage2), at: time + 2 * dt / 3)
+            let next = (full * (omega + (dt / 4) * a) + (3 * dt / 4) * third * c) * projection
+            // An invalid current field freezes progress, matching the previous
+            // CPU-side CFL guard while keeping valid runs asynchronous.
+            return [which(valid, next, omega), elapsed + dt,
+                    completed + valid.asType(.int32)]
         }
-        return result
     }
 
     private func gaussian(x centerX: Float, y centerY: Float, radius: Float) -> MLXArray {

@@ -119,4 +119,49 @@ final class MLXTurbulenceSolverTests: XCTestCase {
             XCTAssertEqual(MLX.max(MLX.abs(first.field - reset.field)).item(Float.self), 0)
         }
     }
+
+    func testForcedBatchesMatchSingleStepsAndUseUpdatedControls() {
+        var initialConfiguration = configuration(size: 32, viscosity: 0.00015)
+        initialConfiguration.forcing = 0.8
+        let batched = MLXTurbulenceSolver(configuration: initialConfiguration, seed: 91)
+        let singles = MLXTurbulenceSolver(configuration: initialConfiguration, seed: 91)
+        let oldViscosity = MLXTurbulenceSolver(configuration: initialConfiguration, seed: 91)
+        let oldForcing = MLXTurbulenceSolver(configuration: initialConfiguration, seed: 91)
+
+        let initialBatch = batched.advance(configuration: initialConfiguration, steps: 16)
+        for _ in 0..<16 { _ = singles.advance(configuration: initialConfiguration) }
+        _ = oldViscosity.advance(configuration: initialConfiguration, steps: 16)
+        _ = oldForcing.advance(configuration: initialConfiguration, steps: 16)
+        XCTAssertLessThan(MLX.max(MLX.abs(initialBatch.field - singles.snapshot().field))
+            .item(Float.self), 0.0001)
+        XCTAssertEqual(initialBatch.statistics.time, singles.snapshot().statistics.time,
+                       accuracy: 0.000001)
+        XCTAssertEqual(initialBatch.statistics.step, singles.snapshot().statistics.step)
+
+        // Both nonzero forcing values use the same compiled path. Compare with
+        // controls held independently fixed to catch stale scalar captures.
+        var updated = initialConfiguration
+        updated.viscosity = 0.08
+        updated.forcing = 2.4
+        updated.timeScale = 0.4
+        let batch = batched.advance(configuration: updated, steps: 8)
+        for _ in 0..<8 { _ = singles.advance(configuration: updated) }
+        let single = singles.snapshot()
+        XCTAssertTrue(batch.statistics.isFinite)
+        XCTAssertLessThan(MLX.max(MLX.abs(batch.field - single.field)).item(Float.self), 0.0001)
+        XCTAssertEqual(batch.statistics.time, single.statistics.time, accuracy: 0.000001)
+        XCTAssertEqual(batch.statistics.step, 24)
+        XCTAssertEqual(batch.statistics.step, single.statistics.step)
+
+        var unchangedViscosity = updated
+        unchangedViscosity.viscosity = initialConfiguration.viscosity
+        let viscosityReference = oldViscosity.advance(configuration: unchangedViscosity, steps: 8)
+        XCTAssertGreaterThan(MLX.max(MLX.abs(batch.field - viscosityReference.field))
+            .item(Float.self), 0.001)
+        var unchangedForcing = updated
+        unchangedForcing.forcing = initialConfiguration.forcing
+        let forcingReference = oldForcing.advance(configuration: unchangedForcing, steps: 8)
+        XCTAssertGreaterThan(MLX.max(MLX.abs(batch.field - forcingReference.field))
+            .item(Float.self), 0.001)
+    }
 }

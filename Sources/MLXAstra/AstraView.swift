@@ -352,6 +352,19 @@ struct AstraView: View {
                         .controlSize(.small)
                         .help("Changing resolution restarts the simulation")
                     }
+                    HStack {
+                        Text("Show every").font(.system(size: 12))
+                        Spacer()
+                        Picker("Show every", selection: $model.stepsPerFrame) {
+                            ForEach([1, 2, 5, 10, 20, 50], id: \.self) { steps in
+                                Text("\(steps) \(steps == 1 ? "step" : "steps")").tag(steps)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 116)
+                        .controlSize(.small)
+                        .help("Maximum integration steps per displayed field. Batches shorten automatically to keep controls responsive.")
+                    }
                     sliderControl("Viscosity", value: String(format: "%.5f", model.config.viscosity), binding: Binding(
                         get: { log10(Double(model.config.viscosity)) },
                         set: { model.config.viscosity = Float(pow(10, $0)) }

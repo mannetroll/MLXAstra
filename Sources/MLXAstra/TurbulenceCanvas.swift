@@ -177,7 +177,7 @@ struct TurbulenceCanvas: NSViewRepresentable {
         private let inFlight = DispatchSemaphore(value: 2)
         fileprivate var frame: RenderFrame?
         fileprivate var needsRender = true
-        private var palette: ColorPalette = .aurora
+        private var palette: ColorPalette = .ember
         private var display: FieldDisplay = .vorticity
         private var exposure: Double = 1
         private var showFlowLines = false

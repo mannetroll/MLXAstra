@@ -35,10 +35,13 @@ or similar detritus not allowed.”
 
 ## Explore
 
+The app opens at **512²** with the **Ember** palette.
+
 - **Initial conditions:** inverse cascade, vortex dance, shear instability, and decaying turbulence.
 - **Drag** to add a positive vortex; **Option-drag or right-drag** reverses its spin.
 - Adjust brush radius, viscosity, energy injection, time scale, and resolution live.
 - Choose **128², 256², 384², 512², 1024², 2048², or 4096²** grids. A resolution or preset change restarts the flow.
+- **Show every** selects 1, 2, 5, 10, 20, or 50 steps between prepared fields; the default is 10. Batches shorten automatically to keep controls responsive, and display refresh remains independent.
 - **Aurora, Ember, and Glacier** palettes show signed vorticity or speed. Exposure adjusts contrast.
 - **Velocity direction** traces short streamlines through the actual instantaneous velocity field.
 - Live kinetic energy, enstrophy, mean time per step, steps per wall-clock second, and energy history track the simulation.
@@ -77,76 +80,96 @@ preset unforced. Vortex impulses wrap across both periodic boundaries and have
 zero spatial mean. This is an exploratory two-dimensional periodic model, without
 walls or a three-dimensional turbulence closure.
 
-Simulation work runs on one serial background queue with at most one pending
-batch. An adaptive batch of 1–32 CFL-checked integration steps targets an 8 ms GPU
-budget between display refreshes. Paused single-step commands always advance once. Evaluated MLX arrays pass to Metal through shared-memory buffers without
-copying the grid to a Swift array. Frames retain those allocations until rendering
-completes. Rendering happens on demand with at most two GPU frames in flight;
-pausing stops integration, and hiding or minimizing the window suspends updates.
-Only scalar diagnostics are read back during normal evolution. PNG export performs
-one explicit image readback. MLX's reusable allocation cache is capped at 128 MiB.
+MLX compiles the CFL calculation and Runge–Kutta stages into GPU graphs. Spectra
+use `[kx, ky]` storage so inverse transforms avoid extra full-grid transpose copies.
+Each completed integration step retires its graph, allowing large FFT buffers to
+be reused; scalar time, step count, and physical diagnostics are read once per batch.
 
-The display refreshes at up to 60 Hz while the solver advances multiple steps per
-refresh. **Simulation · steps/s** counts actual integration steps divided by elapsed
+Simulation work runs continuously on one serial background queue with at most one
+batch in flight. Completing a batch starts the next without waiting for a display
+tick. **Show every** caps the batch at the selected number of steps, while an
+adaptive 40 ms budget shortens batches when needed. At least one step runs per
+batch, even when a large grid takes longer than the budget. Paused single-step
+commands always advance once. Pausing, hiding, or minimizing stops new integration
+work after the current batch finishes.
+
+Evaluated MLX arrays pass to Metal through shared-memory buffers without copying
+the grid to a Swift array. Frames retain those allocations until rendering completes.
+Rendering happens on demand with at most two GPU frames in flight and field updates
+limited to 60 Hz. PNG export performs one explicit image readback.
+
+The reusable allocation cache adapts to resolution: 128 MiB through 512²,
+512 MiB at 1024², 2 GiB at 2048², and 4 GiB at 4096². The limit is also bounded
+by one eighth of physical memory. Live solver allocations are separate from this
+cache, so its limit is not a cap on total GPU memory use.
+
+**Simulation · steps/s** counts actual integration steps divided by elapsed
 wall-clock seconds, independently of display refresh. **Solver · ms** shows mean
 time per integration step, amortizing each batch’s field snapshot. Larger grids,
 strong brush impulses, and other GPU workloads can lower the achieved rate.
 
-Measured on this M1 Max in Release (600 updates after 60 warmup steps, default
-cascade; solver and GPU-buffer handoff only):
+Measured on this M1 Max in Release, using decaying turbulence and the shipping
+solver plus shared-memory GPU-buffer handoff:
 
-| Grid | Mean update | 95th percentile | Unpaced throughput |
-| --- | --- | --- | --- |
-| 256² | 1.61 ms | 2.03 ms | 621 updates/s |
-| 512² | 2.71 ms | 4.36 ms | 370 updates/s |
+| Grid | Mean step | 95th percentile | Steps/s | Peak active MLX memory |
+| --- | --- | --- | --- | --- |
+| 1024² | 2.80 ms | 2.90 ms | 357.2 | 344.6 MiB |
+| 2048² | 9.83 ms | 10.00 ms | 101.8 | 1,377.0 MiB |
+| 4096² | 45.16 ms | 47.16 ms | 22.1 | 3,585.3 MiB |
 
-A separate 3,000-update run at 384² stayed finite, averaging 2.10 ms with a
-2.52 ms 95th percentile and 55.6 MiB peak active MLX allocation. The live 256²
-window was visually checked at its 60 Hz display cadence; solver throughput is
-reported separately as steps/s.
+These runs measured 300/100/30 steps after 30/20/5 warmup steps, with batches of
+10/10/5, respectively. The 4096² check also exported a PNG from the full GPU field.
+All remained finite. A separate forced cascade run at 512² completed 3,000 steps
+after 30 warmup steps, using batches of 10: **845.5 steps/s**, 1.18 ms mean,
+1.28 ms 95th percentile, and 86.5 MiB peak active MLX allocation.
 
-Large-grid smoke checks on the same M1 Max also remained finite:
+The live 1024² decaying flow with **Show every 10** reported **349.2 steps/s**,
+about ten times the earlier 34 steps/s display. Its control check passed pause,
+single-step, reset, and paused brushing. The separately observed rate was
+330.3 steps/s over a window that also included waiting for pause to settle.
 
-| Grid | Mean step | Steps/s | Peak active MLX memory |
-| --- | --- | --- | --- |
-| 1024² | 19.91 ms | 50.2 | 391 MiB |
-| 2048² | 92.86 ms | 10.8 | 1,561 MiB |
-| 4096² | 403.44 ms | 2.48 | 4,642 MiB |
-
-These shorter checks used 50/30/12 measured steps after 5/3/3 warmup steps,
-respectively; the 4096² check also rendered a PNG from the full GPU field.
-Larger grids naturally refresh less frequently when a single integration step
-exceeds the display interval; controls and the simulation remain on separate threads.
-
-These are local measurements, not guarantees or displayed frame rates.
+Benchmark means divide measured wall time by integration steps; percentile values
+use each batch’s amortized time per step. Warmup and the display compositor are
+excluded. These local measurements describe solver throughput, not displayed frame
+rates; the larger-grid runs are short performance and stability checks.
 
 ## Verify
 
 ```sh
 bash Scripts/test.sh
-/tmp/MLXAstraDerived/Build/Products/Release/MLXAstra.app/Contents/MacOS/MLXAstra --live-check
-bash Scripts/benchmark.sh --grid 256 --steps 300 --warmup 30
-bash Scripts/benchmark.sh --grid 512 --steps 300 --warmup 30
-bash Scripts/benchmark.sh --grid 4096 --steps 20 --warmup 3
+open -n -W --stdout /tmp/astra-live-check.json --stderr /tmp/astra-live-check.log \
+  /tmp/MLXAstraDerived/Build/Products/Release/MLXAstra.app \
+  --args --live-check --grid 1024 --preset decaying --batch 10
+cat /tmp/astra-live-check.json
+bash Scripts/benchmark.sh --grid 1024 --preset decaying --steps 300 --warmup 30 --batch 10
+bash Scripts/benchmark.sh --grid 2048 --preset decaying --steps 100 --warmup 20 --batch 10
+bash Scripts/benchmark.sh --grid 4096 --preset decaying --steps 30 --warmup 5 --batch 5 --export /tmp/astra-4096.png
+bash Scripts/benchmark.sh --grid 512 --steps 3000 --warmup 30 --batch 10
 bash Scripts/benchmark.sh --preset vortexDance --steps 240 --export /tmp/astra-vortices.png
 ```
 
-The live check exercises batched throughput, pause, exactly one step, reset, and
-brushing while paused through the actual application worker. It prints JSON and
-closes its test instance.
+The live check opens a test window and exercises batched throughput, pause,
+exactly one step, reset, and brushing while paused through the actual application
+worker. The command above waits for its test instance to close, then prints the
+captured JSON report.
 
-The six numerical tests verify analytic Fourier-mode diffusion, velocity divergence
+The seven numerical tests verify analytic Fourier-mode diffusion, velocity divergence
 and curl, inviscid energy/enstrophy conservation with nontrivial advection, periodic
 vortex injection, strict dealiasing on a grid divisible by three, and deterministic
-finite evolution of every preset. GPU tests require access to Metal and should be
+finite evolution of every preset. A forced-flow regression also verifies that
+batched and single-step evolution agree and that updated controls reach compiled
+GPU steps. GPU tests require access to Metal and should be
 run through Xcode or `Scripts/test.sh`; plain `swift test` is not the build path for
 this native Xcode app.
 
 The benchmark executes the shipping solver and GPU-buffer handoff without UI
-pacing. JSON output includes throughput, mean and 95th-percentile step time,
-physical diagnostics, and MLX allocation statistics. It excludes first-run warmup
-and does not measure the display compositor. `--export` also validates the shipping
-Metal pipeline and writes a PNG.
+pacing. `--batch` selects 1–50 steps per snapshot and defaults to 10; unlike the
+interactive runner, this benchmark uses the requested batch size without a time
+budget. `--cache-mb` optionally overrides the adaptive cache limit in MiB for
+allocation-cache comparisons. JSON output includes throughput, mean and
+95th-percentile amortized step time, physical diagnostics, and MLX allocation
+statistics. It excludes warmup and does not measure the display compositor.
+`--export` also validates the shipping Metal pipeline and writes a PNG.
 
 ## Source map
 

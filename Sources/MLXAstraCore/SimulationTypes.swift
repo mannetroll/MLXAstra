@@ -47,12 +47,20 @@ public enum FieldDisplay: String, CaseIterable, Identifiable, Sendable {
 
 public struct SimulationConfiguration: Equatable, Sendable {
     public static let gridSizes = [128, 256, 384, 512, 1024, 2048, 4096]
-    public var gridSize: Int = 256
+    public var gridSize: Int = 512
     public var preset: FlowPreset = .cascade
     public var viscosity: Float = 0.00015
     public var forcing: Float = 0.8
     public var timeScale: Float = 1
     public init() {}
+
+    /// Reuses freed GPU buffers; this does not limit live solver allocations.
+    public var recommendedCacheLimit: Int {
+        let mebibyte = 1024 * 1024
+        let desired = max(128 * mebibyte, gridSize * gridSize * 512)
+        let budget = min(4 * 1024 * mebibyte, Int(ProcessInfo.processInfo.physicalMemory / 8))
+        return min(desired, budget)
+    }
 }
 
 public struct VortexImpulse: Sendable {

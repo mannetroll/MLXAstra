@@ -15,6 +15,8 @@ enum AppDiagnostics {
     static func beginLiveCheckIfRequested(model: SimulationModel) {
         guard CommandLine.arguments.contains("--live-check"), !liveCheckStarted else { return }
         liveCheckStarted = true
+        model.config = diagnosticConfiguration()
+        model.stepsPerFrame = batchSize(default: 10)
         Task { @MainActor in
             func waitUntil(_ condition: () -> Bool) async throws {
                 let deadline = ProcessInfo.processInfo.systemUptime + 15
@@ -52,6 +54,8 @@ enum AppDiagnostics {
                 let passed = displayedRate > 0 && pausedStep > firstStep && pauseStable
                     && singleStepDelta == 1 && resetAtZero && brushWhilePaused && model.stats.isFinite
                 let report: [String: Any] = [
+                    "grid": model.config.gridSize, "preset": model.config.preset.rawValue,
+                    "show_every": model.stepsPerFrame,
                     "passed": passed, "displayed_steps_per_second": displayedRate,
                     "observed_steps_per_second": Double(pausedStep - firstStep) / wallSeconds,
                     "integration_steps": pausedStep - firstStep, "wall_seconds": wallSeconds,
@@ -79,10 +83,39 @@ enum AppDiagnostics {
             fputs("Metal device unavailable\n", stderr)
             exit(1)
         }
-        func argument(_ key: String) -> String? {
-            guard let index = args.firstIndex(of: key), index + 1 < args.count else { return nil }
-            return args[index + 1]
+        let configuration = diagnosticConfiguration()
+        let steps = max(1, min(100_000, argument("--steps").flatMap(Int.init) ?? 240))
+        let warmup = max(0, min(1_000, argument("--warmup").flatMap(Int.init) ?? 30))
+        let cacheBytes: Int
+        if let requestedCache = argument("--cache-mb") {
+            guard let cacheMiB = Int(requestedCache), (0...8192).contains(cacheMiB) else {
+                fputs("Cache must be 0...8192 MiB\n", stderr); exit(2)
+            }
+            cacheBytes = cacheMiB * 1024 * 1024
+        } else {
+            cacheBytes = configuration.recommendedCacheLimit
         }
+        let batchSize = batchSize(default: 10)
+        Memory.cacheLimit = cacheBytes
+        runBenchmark(configuration: configuration, device: device, steps: steps,
+                     warmup: warmup, cacheBytes: cacheBytes, batchSize: batchSize)
+    }
+
+    private static func argument(_ key: String) -> String? {
+        let args = CommandLine.arguments
+        guard let index = args.firstIndex(of: key), index + 1 < args.count else { return nil }
+        return args[index + 1]
+    }
+
+    private static func batchSize(default defaultValue: Int) -> Int {
+        guard let value = argument("--batch") else { return defaultValue }
+        guard let count = Int(value), (1...50).contains(count) else {
+            fputs("Batch must be 1...50 steps\n", stderr); exit(2)
+        }
+        return count
+    }
+
+    private static func diagnosticConfiguration() -> SimulationConfiguration {
         var configuration = SimulationConfiguration()
         if let grid = argument("--grid") {
             guard let n = Int(grid), SimulationConfiguration.gridSizes.contains(n) else {
@@ -98,29 +131,39 @@ enum AppDiagnostics {
             configuration.preset = value
             if value == .decaying { configuration.forcing = 0 }
         }
-        let steps = max(1, min(100_000, argument("--steps").flatMap(Int.init) ?? 240))
-        let warmup = max(0, min(1_000, argument("--warmup").flatMap(Int.init) ?? 30))
-        Memory.cacheLimit = 128 * 1024 * 1024
+        return configuration
+    }
+
+    private static func runBenchmark(configuration: SimulationConfiguration, device: any MTLDevice,
+                                     steps: Int, warmup: Int, cacheBytes: Int, batchSize: Int) {
         let solver = MLXTurbulenceSolver(configuration: configuration)
         var snapshot = solver.snapshot()
-        for _ in 0..<warmup {
-            snapshot = autoreleasepool { solver.advance(configuration: configuration) }
+        var warmedSteps = 0
+        while warmedSteps < warmup {
+            let count = min(batchSize, warmup - warmedSteps)
+            snapshot = autoreleasepool { solver.advance(configuration: configuration, steps: count) }
+            warmedSteps += count
         }
         var timings: [Double] = []
         timings.reserveCapacity(steps)
         var valid = true
+        let firstStep = snapshot.statistics.step
+        var measuredSteps = 0
         let started = ProcessInfo.processInfo.systemUptime
-        for step in 0..<steps {
+        while measuredSteps < steps {
+            let count = min(batchSize, steps - measuredSteps)
             let t = ProcessInfo.processInfo.systemUptime
             autoreleasepool {
-                snapshot = solver.advance(configuration: configuration)
+                snapshot = solver.advance(configuration: configuration, steps: count)
                 // Include the same shared-memory wrapping used by the live view.
                 let buffer = snapshot.field.asMTLBuffer(device: device, noCopy: true)
                 valid = valid && buffer != nil && snapshot.statistics.isFinite
             }
-            timings.append((ProcessInfo.processInfo.systemUptime - t) * 1000)
-            if !valid {
-                fputs("Non-finite state or GPU buffer failure at step \(step)\n", stderr)
+            let amortizedMilliseconds = (ProcessInfo.processInfo.systemUptime - t) * 1000 / Double(count)
+            timings.append(contentsOf: repeatElement(amortizedMilliseconds, count: count))
+            measuredSteps = snapshot.statistics.step - firstStep
+            if !valid || measuredSteps <= 0 {
+                fputs("Non-finite state or GPU buffer failure at step \(measuredSteps)\n", stderr)
                 exit(1)
             }
         }
@@ -130,7 +173,8 @@ enum AppDiagnostics {
         let stats = snapshot.statistics
         let report: [String: Any] = [
             "device": device.name, "grid": configuration.gridSize,
-            "preset": configuration.preset.rawValue, "steps": steps, "warmup": warmup,
+            "preset": configuration.preset.rawValue, "steps": measuredSteps, "warmup": warmup,
+            "batch_steps": batchSize, "cache_limit_mb": Double(cacheBytes) / 1048576,
             "elapsed_seconds": elapsed, "updates_per_second": Double(steps) / elapsed,
             "mean_ms": elapsed * 1000 / Double(steps), "p95_ms": p95,
             "simulation_time": stats.time, "energy": stats.energy, "enstrophy": stats.enstrophy,
@@ -147,7 +191,7 @@ enum AppDiagnostics {
                 }
                 let frame = RenderFrame(buffer: buffer, gridSize: snapshot.gridSize, sequence: stats.step,
                                         maxVorticity: stats.maxVorticity, maxSpeed: stats.maxSpeed, owner: snapshot.field)
-                let png = try TurbulenceSnapshot.pngData(frame: frame, palette: .aurora,
+                let png = try TurbulenceSnapshot.pngData(frame: frame, palette: .ember,
                     display: .vorticity, exposure: 1.2, showFlowLines: false, pixelSize: 1400)
                 try png.write(to: URL(fileURLWithPath: path), options: .atomic)
             }

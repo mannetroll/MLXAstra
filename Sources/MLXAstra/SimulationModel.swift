@@ -13,34 +13,35 @@ private final class SimulationWorker: @unchecked Sendable {
     private var sequence = 0
     private var batchSteps = 1
     private var estimatedMillisecondsPerStep = 2.0
-    private let batchBudgetMilliseconds = 8.0
+    private let batchBudgetMilliseconds = 40.0
     private let device: any MTLDevice
 
     init(device: any MTLDevice) { self.device = device }
 
     func compute(configuration: SimulationConfiguration, generation: UInt64,
                  impulses: [VortexImpulse], advance: Bool,
-                 continuous: Bool) -> (RenderFrame?, SimulationStatistics) {
+                 continuous: Bool, stepsPerFrame: Int) -> (RenderFrame?, SimulationStatistics) {
         if solver == nil || self.generation != generation {
+            Memory.cacheLimit = configuration.recommendedCacheLimit
             if let solver { solver.reset(configuration: configuration) }
             else {
-                Memory.cacheLimit = 128 * 1024 * 1024
                 solver = MLXTurbulenceSolver(configuration: configuration)
             }
             self.generation = generation
             batchSteps = 1
             estimatedMillisecondsPerStep = 2
         }
-        // The display refreshes at 60 Hz. Advance several independently CFL-checked
-        // integration steps per refresh, budgeting GPU time to keep input responsive.
+        // Solver batches run independently of the display clock. Keep each batch
+        // short enough to pick up input promptly, with one step minimum at large grids.
         // A paused Single Step always bypasses batching and advances exactly once.
-        let count = advance ? (continuous ? batchSteps : 1) : 0
+        let limit = max(1, min(50, stepsPerFrame))
+        let count = advance ? (continuous ? min(batchSteps, limit) : 1) : 0
         let snapshot = solver!.advance(configuration: configuration, impulses: impulses, steps: count)
         if continuous && count > 0 && snapshot.statistics.isFinite {
             let duration = snapshot.statistics.solverMilliseconds
             let sample = max(duration / Double(count), 0.01)
             estimatedMillisecondsPerStep = 0.8 * estimatedMillisecondsPerStep + 0.2 * sample
-            let desired = max(1, min(32, Int(batchBudgetMilliseconds / estimatedMillisecondsPerStep)))
+            let desired = max(1, min(limit, Int(batchBudgetMilliseconds / estimatedMillisecondsPerStep)))
             if duration > batchBudgetMilliseconds * 1.5 {
                 // React immediately to a slower grid or competing GPU workload.
                 batchSteps = max(1, Int(Double(count) * batchBudgetMilliseconds / duration))
@@ -68,10 +69,11 @@ final class SimulationModel: ObservableObject {
             if config.gridSize != oldValue.gridSize || config.preset != oldValue.preset { reset() }
         }
     }
-    @Published var palette: ColorPalette = .aurora
+    @Published var palette: ColorPalette = .ember
     @Published var display: FieldDisplay = .vorticity
     @Published var isRunning = true
     @Published var showFlowLines = false
+    @Published var stepsPerFrame = 10
     @Published var exposure: Double = 1.2
     @Published var brushRadius: Double = 0.035
     @Published var stats = SimulationStatistics()
@@ -99,6 +101,9 @@ final class SimulationModel: ObservableObject {
     private var lastDeliveredStep = 0
     private var lastPublication = 0.0
     private var latestStatistics = SimulationStatistics()
+    private var pendingFrame: RenderFrame?
+    private var lastFramePublication = 0.0
+    private let frameInterval = 1.0 / 60.0
 
     init() {
         if let device = MTLCreateSystemDefaultDevice() {
@@ -118,8 +123,11 @@ final class SimulationModel: ObservableObject {
         measurementStart = ProcessInfo.processInfo.systemUptime
         completedSteps = 0
         completedSolverMilliseconds = 0
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
+        let timer = Timer(timeInterval: frameInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.publishPendingFrame()
+                self?.tick()
+            }
         }
         timer.tolerance = 0.001
         RunLoop.main.add(timer, forMode: .common)
@@ -142,6 +150,8 @@ final class SimulationModel: ObservableObject {
         if !isRunning {
             stepsPerSecond = 0
             stats = latestStatistics
+        } else {
+            tick()
         }
     }
 
@@ -162,6 +172,7 @@ final class SimulationModel: ObservableObject {
         statusMessage = nil
         isReady = false
         pendingSteps = 0
+        pendingFrame = nil
         // Old generation results are discarded; no competing reset can touch MLX state.
         if active { tick() }
     }
@@ -204,6 +215,7 @@ final class SimulationModel: ObservableObject {
         let currentConfig = config
         let currentImpulses = impulses
         let continuous = isRunning
+        let currentStepsPerFrame = stepsPerFrame
         let advance = continuous || pendingSteps > 0
         impulses.removeAll(keepingCapacity: true)
         needsFrame = false
@@ -211,7 +223,8 @@ final class SimulationModel: ObservableObject {
         queue.async { [weak self] in
             let result = autoreleasepool {
                 worker.compute(configuration: currentConfig, generation: currentGeneration,
-                               impulses: currentImpulses, advance: advance, continuous: continuous)
+                               impulses: currentImpulses, advance: advance, continuous: continuous,
+                               stepsPerFrame: currentStepsPerFrame)
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -232,9 +245,9 @@ final class SimulationModel: ObservableObject {
                     self.stepsPerSecond = 0
                     return
                 }
-                self.frame = frame
+                self.pendingFrame = frame
+                self.publishPendingFrame()
                 self.latestStatistics = result.1
-                self.isReady = true
                 let now = ProcessInfo.processInfo.systemUptime
                 let advancedSteps = max(0, result.1.step - self.lastDeliveredStep)
                 self.lastDeliveredStep = result.1.step
@@ -258,8 +271,22 @@ final class SimulationModel: ObservableObject {
                     if self.history.count > 90 { self.history.removeFirst(self.history.count - 90) }
                     self.lastPublication = now
                 }
+                // One completion schedules one successor. The main queue remains free
+                // for input while the serial worker runs; a slow batch never waits for
+                // the next display tick before starting another integration step.
+                self.tick()
             }
         }
+    }
+
+    private func publishPendingFrame() {
+        guard let pendingFrame else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastFramePublication >= frameInterval else { return }
+        frame = pendingFrame
+        if !isReady { isReady = true }
+        self.pendingFrame = nil
+        lastFramePublication = now
     }
 
     func saveSnapshot() {
