@@ -4,7 +4,9 @@ A native macOS laboratory for two-dimensional turbulence, built for Apple silico
 MLX evolves an incompressible fluid on the GPU; a custom Metal renderer reveals
 its vorticity, eddies, and velocity field in an interactive SwiftUI workspace.
 
-![MLX Astra running on an M1 Max](Documentation/astra.png)
+![MLX Astra GUI showing 512 × 512 turbulence in Ember, simulation controls, and live performance statistics](GUI.png)
+
+*512² turbulence in Ember, running on an M1 Max with live controls and simulation statistics.*
 
 ## Run
 
