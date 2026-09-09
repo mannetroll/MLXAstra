@@ -39,7 +39,7 @@ or similar detritus not allowed.”
 
 ## Explore
 
-The app opens at **512²** with the **Ember** palette.
+The app opens at **1024²** with **1536²** nonlinear padding and the **Ember** palette.
 
 - **Initial conditions:** inverse cascade, vortex dance, shear instability, and decaying turbulence.
 - **Drag** to add a positive vortex; **Option-drag or right-drag** reverses its spin.

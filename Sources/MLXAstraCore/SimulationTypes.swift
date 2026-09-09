@@ -47,7 +47,7 @@ public enum FieldDisplay: String, CaseIterable, Identifiable, Sendable {
 
 public struct SimulationConfiguration: Equatable, Sendable {
     public static let gridSizes = [128, 256, 384, 512, 1024, 2048, 4096]
-    public var gridSize: Int = 512
+    public var gridSize: Int = 1024
     public var preset: FlowPreset = .cascade
     public var viscosity: Float = 0.00015
     public var forcing: Float = 0.8
