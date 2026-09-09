@@ -88,3 +88,34 @@ public struct SimulationStatistics: Sendable {
     public var isFinite: Bool = true
     public init() {}
 }
+
+/// Physical progress per active wall second over the whole run. Call only for
+/// completed automatic batches; manual steps have no place in either total.
+public struct SimulationRunAverage: Sendable {
+    public private(set) var simulationTime: Double = 0
+    public private(set) var wallTime: Double = 0
+    private var lastSegment: UInt64?
+    private var lastCompletion: Double?
+
+    public init() {}
+
+    public var simulationTimePerSecond: Double {
+        wallTime > 0 ? simulationTime / wallTime : 0
+    }
+
+    /// Each resume starts a new segment at its first actual automatic batch.
+    /// Within a segment, include scheduling and display work between batches.
+    /// A batch draining after pause still contributes its full work and duration.
+    public mutating func record(advancedSimulationTime: Double,
+                                startedAt: Double, completedAt: Double,
+                                segment: UInt64) {
+        guard advancedSimulationTime.isFinite, advancedSimulationTime >= 0,
+              startedAt.isFinite, completedAt.isFinite, completedAt > startedAt else { return }
+        let beginning = lastSegment == segment ? (lastCompletion ?? startedAt) : startedAt
+        guard completedAt > beginning else { return }
+        simulationTime += advancedSimulationTime
+        wallTime += completedAt - beginning
+        lastSegment = segment
+        lastCompletion = completedAt
+    }
+}

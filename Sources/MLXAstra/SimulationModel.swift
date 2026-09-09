@@ -6,6 +6,14 @@ import MLX
 import MLXAstraCore
 import UniformTypeIdentifiers
 
+private struct SimulationWorkerResult {
+    let frame: RenderFrame?
+    let statistics: SimulationStatistics
+    let initialTurnoverTime: Double
+    let advanceStartedAt: Double
+    let completedAt: Double
+}
+
 /// MLX arrays and their lazy graphs stay on this one serial worker.
 private final class SimulationWorker: @unchecked Sendable {
     private var solver: MLXTurbulenceSolver?
@@ -21,7 +29,7 @@ private final class SimulationWorker: @unchecked Sendable {
 
     func compute(configuration: SimulationConfiguration, generation: UInt64,
                  impulses: [VortexImpulse], advance: Bool,
-                 continuous: Bool, stepsPerFrame: Int) -> (RenderFrame?, SimulationStatistics, Double) {
+                 continuous: Bool, stepsPerFrame: Int) -> SimulationWorkerResult {
         if solver == nil || self.generation != generation {
             Memory.cacheLimit = configuration.recommendedCacheLimit
             if let solver { solver.reset(configuration: configuration) }
@@ -42,6 +50,8 @@ private final class SimulationWorker: @unchecked Sendable {
         // A paused Single Step always bypasses batching and advances exactly once.
         let limit = max(1, min(50, stepsPerFrame))
         let count = advance ? (continuous ? min(batchSteps, limit) : 1) : 0
+        // Initialization is finished; include the first actual integration batch.
+        let advanceStartedAt = ProcessInfo.processInfo.systemUptime
         let snapshot = solver!.advance(configuration: configuration, impulses: impulses, steps: count)
         if continuous && count > 0 && snapshot.statistics.isFinite {
             let duration = snapshot.statistics.solverMilliseconds
@@ -64,7 +74,9 @@ private final class SimulationWorker: @unchecked Sendable {
                         maxVorticity: snapshot.statistics.maxVorticity,
                         maxSpeed: snapshot.statistics.maxSpeed, owner: snapshot.field)
         }
-        return (frame, snapshot.statistics, initialTurnoverTime)
+        return SimulationWorkerResult(frame: frame, statistics: snapshot.statistics,
+            initialTurnoverTime: initialTurnoverTime, advanceStartedAt: advanceStartedAt,
+            completedAt: ProcessInfo.processInfo.systemUptime)
     }
 }
 
@@ -106,8 +118,9 @@ final class SimulationModel: ObservableObject {
     private var impulses: [VortexImpulse] = []
     private var measurementStart = ProcessInfo.processInfo.systemUptime
     private var completedSteps = 0
-    private var completedSimulationTime = 0.0
     private var completedSolverMilliseconds = 0.0
+    private var runAverage = SimulationRunAverage()
+    private var throughputSegment: UInt64 = 0
     private var lastDeliveredStep = 0
     private var lastDeliveredTime = 0.0
     private var lastPublication = 0.0
@@ -203,11 +216,14 @@ final class SimulationModel: ObservableObject {
     }
 
     private func resetThroughputMeasurement(clearDisplayedRates: Bool = true) {
+        // Changing segment excludes pause, hidden-window idle, and manual work,
+        // but keeps earlier automatic work in the cumulative run average.
+        throughputSegment &+= 1
         measurementStart = ProcessInfo.processInfo.systemUptime
         completedSteps = 0
-        completedSimulationTime = 0
         completedSolverMilliseconds = 0
         if clearDisplayedRates {
+            runAverage = SimulationRunAverage()
             stepsPerSecond = 0
             simulationTimePerSecond = 0
             initialTurnoversPerSecond = 0
@@ -232,6 +248,7 @@ final class SimulationModel: ObservableObject {
         let currentConfig = config
         let currentImpulses = impulses
         let continuous = isRunning
+        let currentThroughputSegment = throughputSegment
         let currentStepsPerFrame = stepsPerFrame
         let advance = continuous || pendingSteps > 0
         impulses.removeAll(keepingCapacity: true)
@@ -250,13 +267,13 @@ final class SimulationModel: ObservableObject {
                     self.tick()
                     return
                 }
-                guard let frame = result.0 else {
+                guard let frame = result.frame else {
                     self.statusMessage = "The GPU could not allocate a display buffer. Try a smaller grid."
                     self.isRunning = false
                     self.resetThroughputMeasurement(clearDisplayedRates: false)
                     return
                 }
-                guard result.1.isFinite else {
+                guard result.statistics.isFinite else {
                     self.statusMessage = "The flow became unstable. Reset the field or increase viscosity."
                     self.isRunning = false
                     self.resetThroughputMeasurement(clearDisplayedRates: false)
@@ -264,27 +281,38 @@ final class SimulationModel: ObservableObject {
                 }
                 self.pendingFrame = frame
                 self.publishPendingFrame()
-                self.latestStatistics = result.1
-                self.initialTurnoverTime = result.2
+                self.latestStatistics = result.statistics
+                self.initialTurnoverTime = result.initialTurnoverTime
                 let now = ProcessInfo.processInfo.systemUptime
-                let advancedSteps = max(0, result.1.step - self.lastDeliveredStep)
-                let advancedTime = max(0, result.1.time - self.lastDeliveredTime)
-                self.lastDeliveredStep = result.1.step
-                self.lastDeliveredTime = result.1.time
-                self.completedSteps += advancedSteps
-                self.completedSimulationTime += advancedTime
-                if advancedSteps > 0 {
-                    self.completedSolverMilliseconds += result.1.solverMilliseconds
+                let advancedSteps = max(0, result.statistics.step - self.lastDeliveredStep)
+                let advancedTime = max(0, result.statistics.time - self.lastDeliveredTime)
+                self.lastDeliveredStep = result.statistics.step
+                self.lastDeliveredTime = result.statistics.time
+                if continuous && advancedSteps > 0 {
+                    self.runAverage.record(advancedSimulationTime: advancedTime,
+                        startedAt: result.advanceStartedAt, completedAt: result.completedAt,
+                        segment: currentThroughputSegment)
                 }
-                if now - self.lastPublication >= 0.25 || !self.isRunning || result.1.step == 0 {
-                    self.stats = result.1
+                // An older automatic batch may finish after pause/resume. Keep it
+                // in the run average without mixing it into the new rolling window.
+                let currentAutomaticBatch = continuous
+                    && currentThroughputSegment == self.throughputSegment
+                    && self.isRunning && self.active
+                if currentAutomaticBatch {
+                    self.completedSteps += advancedSteps
+                    if advancedSteps > 0 {
+                        self.completedSolverMilliseconds += result.statistics.solverMilliseconds
+                    }
+                }
+                if now - self.lastPublication >= 0.25 || !self.isRunning || result.statistics.step == 0 {
+                    self.stats = result.statistics
                     let interval = now - self.measurementStart
                     if interval >= 0.25 {
                         // A pause keeps the most recent live throughput visible;
                         // paused work and Single Step do not replace that sample.
-                        if self.isRunning && self.active {
+                        if currentAutomaticBatch {
                             self.stepsPerSecond = Double(self.completedSteps) / interval
-                            self.simulationTimePerSecond = self.completedSimulationTime / interval
+                            self.simulationTimePerSecond = self.runAverage.simulationTimePerSecond
                             self.initialTurnoversPerSecond = self.initialTurnoverTime > 0
                                 ? self.simulationTimePerSecond / self.initialTurnoverTime : 0
                             if self.completedSteps > 0 {
@@ -293,10 +321,9 @@ final class SimulationModel: ObservableObject {
                         }
                         self.measurementStart = now
                         self.completedSteps = 0
-                        self.completedSimulationTime = 0
                         self.completedSolverMilliseconds = 0
                     }
-                    self.history.append(Double(result.1.energy))
+                    self.history.append(Double(result.statistics.energy))
                     if self.history.count > 90 { self.history.removeFirst(self.history.count - 90) }
                     self.lastPublication = now
                 }

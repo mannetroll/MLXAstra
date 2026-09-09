@@ -255,11 +255,11 @@ struct AstraView: View {
         HStack(spacing: 0) {
             metric(title: "SIMULATED TIME", value: metricNumber(model.simulationTimePerSecond), unit: "per wall s")
                 .foregroundStyle(AstraTheme.accent)
-                .help("Last measured live throughput: completed physical simulation time per elapsed wall-clock second. Retained while paused.")
+                .help("Average physical simulation time per active wall second since reset. Excludes initialization, pauses, and manual steps; retains the displayed average while paused.")
             metricDivider
             metric(title: "INITIAL TURNOVERS", value: metricNumber(model.initialTurnoversPerSecond), unit: "per wall s")
                 .foregroundStyle(AstraTheme.accent)
-                .help("Last measured live rate: completed physical simulation time divided by the run's initial turnover time τ₀ and elapsed wall-clock time. Retained while paused.")
+                .help("Average initial turnovers per active wall second since reset: the cumulative simulation rate divided by the run's fixed initial turnover time τ₀. Retained while paused.")
             metricDivider
             VStack(alignment: .leading, spacing: 5) {
                 metricLabel("KINETIC ENERGY")
