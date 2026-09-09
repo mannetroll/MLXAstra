@@ -12,6 +12,7 @@ private final class SimulationWorker: @unchecked Sendable {
     private var generation: UInt64 = .max
     private var sequence = 0
     private var batchSteps = 1
+    private var initialTurnoverTime = 0.0
     private var estimatedMillisecondsPerStep = 2.0
     private let batchBudgetMilliseconds = 40.0
     private let device: any MTLDevice
@@ -20,7 +21,7 @@ private final class SimulationWorker: @unchecked Sendable {
 
     func compute(configuration: SimulationConfiguration, generation: UInt64,
                  impulses: [VortexImpulse], advance: Bool,
-                 continuous: Bool, stepsPerFrame: Int) -> (RenderFrame?, SimulationStatistics) {
+                 continuous: Bool, stepsPerFrame: Int) -> (RenderFrame?, SimulationStatistics, Double) {
         if solver == nil || self.generation != generation {
             Memory.cacheLimit = configuration.recommendedCacheLimit
             if let solver { solver.reset(configuration: configuration) }
@@ -30,6 +31,11 @@ private final class SimulationWorker: @unchecked Sendable {
             self.generation = generation
             batchSteps = 1
             estimatedMillisecondsPerStep = 2
+            // reset() already evaluated and cached the initial snapshot. Capture
+            // its turnover scale before the first step or any brush impulses.
+            let initialEnstrophy = Double(solver!.snapshot().statistics.enstrophy)
+            initialTurnoverTime = initialEnstrophy.isFinite && initialEnstrophy > 0
+                ? 2 * .pi / sqrt(2 * initialEnstrophy) : 0
         }
         // Solver batches run independently of the display clock. Keep each batch
         // short enough to pick up input promptly, with one step minimum at large grids.
@@ -58,7 +64,7 @@ private final class SimulationWorker: @unchecked Sendable {
                         maxVorticity: snapshot.statistics.maxVorticity,
                         maxSpeed: snapshot.statistics.maxSpeed, owner: snapshot.field)
         }
-        return (frame, snapshot.statistics)
+        return (frame, snapshot.statistics, initialTurnoverTime)
     }
 }
 
@@ -78,6 +84,8 @@ final class SimulationModel: ObservableObject {
     @Published var brushRadius: Double = 0.035
     @Published var stats = SimulationStatistics()
     @Published var stepsPerSecond: Double = 0
+    @Published var simulationTimePerSecond: Double = 0
+    @Published var initialTurnoversPerSecond: Double = 0
     @Published var millisecondsPerStep: Double = 0
     @Published var history: [Double] = []
     @Published var statusMessage: String?
@@ -85,6 +93,7 @@ final class SimulationModel: ObservableObject {
     @Published var isFocusMode = false
     @Published var frame: RenderFrame?
     let deviceName: String
+    private(set) var initialTurnoverTime = 0.0
 
     private let queue = DispatchQueue(label: "com.mannetroll.MLXAstra.simulation", qos: .userInitiated)
     private var worker: SimulationWorker?
@@ -97,8 +106,10 @@ final class SimulationModel: ObservableObject {
     private var impulses: [VortexImpulse] = []
     private var measurementStart = ProcessInfo.processInfo.systemUptime
     private var completedSteps = 0
+    private var completedSimulationTime = 0.0
     private var completedSolverMilliseconds = 0.0
     private var lastDeliveredStep = 0
+    private var lastDeliveredTime = 0.0
     private var lastPublication = 0.0
     private var latestStatistics = SimulationStatistics()
     private var pendingFrame: RenderFrame?
@@ -120,9 +131,7 @@ final class SimulationModel: ObservableObject {
         guard worker != nil else { return }
         active = true
         guard timer == nil else { return }
-        measurementStart = ProcessInfo.processInfo.systemUptime
-        completedSteps = 0
-        completedSolverMilliseconds = 0
+        resetThroughputMeasurement(clearDisplayedRates: false)
         let timer = Timer(timeInterval: frameInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.publishPendingFrame()
@@ -139,16 +148,13 @@ final class SimulationModel: ObservableObject {
         active = false
         timer?.invalidate()
         timer = nil
-        stepsPerSecond = 0
+        resetThroughputMeasurement(clearDisplayedRates: false)
     }
 
     func togglePause() {
         isRunning.toggle()
-        measurementStart = ProcessInfo.processInfo.systemUptime
-        completedSteps = 0
-        completedSolverMilliseconds = 0
+        resetThroughputMeasurement(clearDisplayedRates: false)
         if !isRunning {
-            stepsPerSecond = 0
             stats = latestStatistics
         } else {
             tick()
@@ -163,12 +169,11 @@ final class SimulationModel: ObservableObject {
         stats = SimulationStatistics()
         latestStatistics = stats
         lastDeliveredStep = 0
+        lastDeliveredTime = 0
+        initialTurnoverTime = 0
         millisecondsPerStep = 0
         lastPublication = 0
-        stepsPerSecond = 0
-        completedSteps = 0
-        completedSolverMilliseconds = 0
-        measurementStart = ProcessInfo.processInfo.systemUptime
+        resetThroughputMeasurement()
         statusMessage = nil
         isReady = false
         pendingSteps = 0
@@ -192,9 +197,21 @@ final class SimulationModel: ObservableObject {
 
     func stepOnce() {
         isRunning = false
-        stepsPerSecond = 0
+        resetThroughputMeasurement(clearDisplayedRates: false)
         pendingSteps += 1
         tick()
+    }
+
+    private func resetThroughputMeasurement(clearDisplayedRates: Bool = true) {
+        measurementStart = ProcessInfo.processInfo.systemUptime
+        completedSteps = 0
+        completedSimulationTime = 0
+        completedSolverMilliseconds = 0
+        if clearDisplayedRates {
+            stepsPerSecond = 0
+            simulationTimePerSecond = 0
+            initialTurnoversPerSecond = 0
+        }
     }
 
     func inject(x: Float, y: Float, negative: Bool) {
@@ -236,22 +253,26 @@ final class SimulationModel: ObservableObject {
                 guard let frame = result.0 else {
                     self.statusMessage = "The GPU could not allocate a display buffer. Try a smaller grid."
                     self.isRunning = false
-                    self.stepsPerSecond = 0
+                    self.resetThroughputMeasurement(clearDisplayedRates: false)
                     return
                 }
                 guard result.1.isFinite else {
                     self.statusMessage = "The flow became unstable. Reset the field or increase viscosity."
                     self.isRunning = false
-                    self.stepsPerSecond = 0
+                    self.resetThroughputMeasurement(clearDisplayedRates: false)
                     return
                 }
                 self.pendingFrame = frame
                 self.publishPendingFrame()
                 self.latestStatistics = result.1
+                self.initialTurnoverTime = result.2
                 let now = ProcessInfo.processInfo.systemUptime
                 let advancedSteps = max(0, result.1.step - self.lastDeliveredStep)
+                let advancedTime = max(0, result.1.time - self.lastDeliveredTime)
                 self.lastDeliveredStep = result.1.step
+                self.lastDeliveredTime = result.1.time
                 self.completedSteps += advancedSteps
+                self.completedSimulationTime += advancedTime
                 if advancedSteps > 0 {
                     self.completedSolverMilliseconds += result.1.solverMilliseconds
                 }
@@ -259,12 +280,20 @@ final class SimulationModel: ObservableObject {
                     self.stats = result.1
                     let interval = now - self.measurementStart
                     if interval >= 0.25 {
-                        self.stepsPerSecond = self.isRunning && self.active ? Double(self.completedSteps) / interval : 0
-                        if self.completedSteps > 0 {
-                            self.millisecondsPerStep = self.completedSolverMilliseconds / Double(self.completedSteps)
+                        // A pause keeps the most recent live throughput visible;
+                        // paused work and Single Step do not replace that sample.
+                        if self.isRunning && self.active {
+                            self.stepsPerSecond = Double(self.completedSteps) / interval
+                            self.simulationTimePerSecond = self.completedSimulationTime / interval
+                            self.initialTurnoversPerSecond = self.initialTurnoverTime > 0
+                                ? self.simulationTimePerSecond / self.initialTurnoverTime : 0
+                            if self.completedSteps > 0 {
+                                self.millisecondsPerStep = self.completedSolverMilliseconds / Double(self.completedSteps)
+                            }
                         }
                         self.measurementStart = now
                         self.completedSteps = 0
+                        self.completedSimulationTime = 0
                         self.completedSolverMilliseconds = 0
                     }
                     self.history.append(Double(result.1.energy))

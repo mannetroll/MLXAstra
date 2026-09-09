@@ -49,6 +49,7 @@ The app opens at **512²** with the **Ember** palette.
 - **Show every** selects 1, 2, 5, 10, 20, or 50 steps between prepared fields; the default is 10. Batches shorten automatically to keep controls responsive, and display refresh remains independent.
 - **Aurora, Ember, and Glacier** palettes show signed vorticity or speed. Exposure adjusts contrast.
 - **Velocity direction** traces short streamlines through the actual instantaneous velocity field.
+- **SIMULATED TIME** shows completed physical simulation time per wall second. **INITIAL TURNOVERS** shows that rate divided by the flow's initial turnover time; both use `per wall s`. The last measured rates remain visible while paused, alongside steps/s.
 - Live kinetic energy, enstrophy, mean time per step, steps per wall-clock second, and energy history track the simulation.
 
 | Action | Shortcut |
@@ -64,6 +65,16 @@ current field and palette at 1800 × 1800, without interface controls or the bru
 cursor. The Help menu explains the controls and numerical model.
 
 ## Physics and performance
+
+The two physical-throughput readouts share the existing rolling wall-time window
+used for steps/s. They use completed simulation-time differences, so adaptive
+timesteps and the time-scale control are reflected in the measured progress.
+Pausing or single-stepping keeps the last live performance sample on screen;
+resuming replaces it when a new sample is ready. Reset clears the old run's rates.
+The initial turnover scale is `τ₀ = 2π / sqrt(2Z₀)`, with `Z₀` taken from the
+evaluated initial field before stepping. It stays fixed through decay, forcing,
+and brushing, and is recaptured when the flow resets. Reading this cached initial
+snapshot adds no new FFT or per-step GPU work.
 
 The solver advances the dimensionless vorticity equation on a periodic
 `[0, 2π) × [0, 2π)` domain:

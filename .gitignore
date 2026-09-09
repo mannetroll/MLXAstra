@@ -1,5 +1,6 @@
 # macOS metadata
 .DS_Store
+Benchmarks
 
 # Build products and local dependency caches
 .build/

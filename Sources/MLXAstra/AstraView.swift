@@ -253,16 +253,24 @@ struct AstraView: View {
 
     private var metrics: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
+            metric(title: "SIMULATED TIME", value: metricNumber(model.simulationTimePerSecond), unit: "per wall s")
+                .foregroundStyle(AstraTheme.accent)
+                .help("Last measured live throughput: completed physical simulation time per elapsed wall-clock second. Retained while paused.")
+            metricDivider
+            metric(title: "INITIAL TURNOVERS", value: metricNumber(model.initialTurnoversPerSecond), unit: "per wall s")
+                .foregroundStyle(AstraTheme.accent)
+                .help("Last measured live rate: completed physical simulation time divided by the run's initial turnover time τ₀ and elapsed wall-clock time. Retained while paused.")
+            metricDivider
+            VStack(alignment: .leading, spacing: 5) {
                 metricLabel("KINETIC ENERGY")
-                HStack(spacing: 12) {
+                HStack(spacing: 4) {
                     Text(metricNumber(Double(model.stats.energy)))
-                        .font(.system(size: 19, weight: .light, design: .monospaced))
+                        .font(.system(size: 16, weight: .light, design: .monospaced))
                         .monospacedDigit()
+                        .lineLimit(1).minimumScaleFactor(0.8)
                     EnergySparkline(samples: model.history)
-                        .stroke(AstraTheme.accent.opacity(0.85), style: StrokeStyle(lineWidth: 1.25, lineCap: .round, lineJoin: .round))
-                        .frame(maxWidth: 80)
-                        .frame(height: 24)
+                        .stroke(AstraTheme.accent.opacity(0.85), style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round))
+                        .frame(width: 24, height: 16)
                         .accessibilityLabel("Kinetic energy history")
                 }
             }
@@ -277,15 +285,19 @@ struct AstraView: View {
                 .help("Solver integration steps per wall-clock second; display refresh is independent.")
         }
         .padding(.horizontal, 20)
-        .frame(height: 86)
+        .frame(height: 62)
     }
 
     private func metric(title: String, value: String, unit: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             metricLabel(title)
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(value).font(.system(size: 19, weight: .light, design: .monospaced)).monospacedDigit()
-                if let unit { Text(unit).font(.system(size: 9, design: .monospaced)).foregroundStyle(AstraTheme.secondary) }
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(value).font(.system(size: 16, weight: .light, design: .monospaced)).monospacedDigit()
+                    .lineLimit(1).minimumScaleFactor(0.8)
+                if let unit {
+                    Text(unit).font(.system(size: 7.5, design: .monospaced)).foregroundStyle(AstraTheme.secondary)
+                        .fixedSize()
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -293,13 +305,14 @@ struct AstraView: View {
 
     private func metricLabel(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 8, weight: .medium, design: .monospaced))
-            .tracking(1)
+            .font(.system(size: 7, weight: .medium, design: .monospaced))
+            .tracking(0.5)
             .foregroundStyle(AstraTheme.secondary)
+            .lineLimit(1)
     }
 
     private var metricDivider: some View {
-        Rectangle().fill(AstraTheme.border).frame(width: 1, height: 35).padding(.horizontal, 18)
+        Rectangle().fill(AstraTheme.border).frame(width: 1, height: 28).padding(.horizontal, 7)
     }
 
     private var inspector: some View {

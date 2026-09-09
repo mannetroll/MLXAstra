@@ -28,36 +28,107 @@ enum AppDiagnostics {
                     try await Task.sleep(for: .milliseconds(20))
                 }
             }
+            @MainActor func throughputIsZero() -> Bool {
+                model.stepsPerSecond == 0 && model.simulationTimePerSecond == 0
+                    && model.initialTurnoversPerSecond == 0
+            }
+            func nearlyEqual(_ actual: Double, _ expected: Double) -> Bool {
+                actual.isFinite && expected.isFinite
+                    && abs(actual - expected) <= 1e-12 * max(abs(expected), Double.leastNormalMagnitude)
+            }
             do {
                 try await waitUntil { model.isReady && model.stats.step > 0 }
                 let firstStep = model.stats.step
+                let firstSimulationTime = model.stats.time
+                let initialTurnoverTime = model.initialTurnoverTime
                 let began = ProcessInfo.processInfo.systemUptime
                 try await Task.sleep(for: .seconds(3))
                 let displayedRate = model.stepsPerSecond
+                let displayedSimulationRate = model.simulationTimePerSecond
+                let displayedTurnoverRate = model.initialTurnoversPerSecond
+                @MainActor func retainsRunningThroughput() -> Bool {
+                    model.stepsPerSecond == displayedRate
+                        && model.simulationTimePerSecond == displayedSimulationRate
+                        && model.initialTurnoversPerSecond == displayedTurnoverRate
+                }
+                let runningThroughputPositive = displayedRate.isFinite && displayedRate > 0
+                    && displayedSimulationRate.isFinite && displayedSimulationRate > 0
+                    && displayedTurnoverRate.isFinite && displayedTurnoverRate > 0
+                let turnoverRelationMatches = initialTurnoverTime > 0
+                    && nearlyEqual(displayedTurnoverRate, displayedSimulationRate / initialTurnoverTime)
+                let turnoverFixedWhileAdvancing = model.initialTurnoverTime == initialTurnoverTime
                 let milliseconds = model.millisecondsPerStep
                 model.togglePause()
+                let throughputRetainedOnPause = retainsRunningThroughput()
                 try await Task.sleep(for: .milliseconds(150))
                 let pausedStep = model.stats.step
+                let pausedSimulationTime = model.stats.time
                 let wallSeconds = ProcessInfo.processInfo.systemUptime - began
                 try await Task.sleep(for: .milliseconds(150))
                 let pauseStable = model.stats.step == pausedStep
+                let throughputRetainedWhilePaused = retainsRunningThroughput()
+                let turnoverFixedWhilePaused = model.initialTurnoverTime == initialTurnoverTime
                 model.stepOnce()
+                let throughputRetainedOnSingleStep = retainsRunningThroughput()
                 try await waitUntil { model.stats.step > pausedStep }
                 let singleStepDelta = model.stats.step - pausedStep
+                let throughputRetainedAfterSingleStep = retainsRunningThroughput()
+                let turnoverFixedAfterSingleStep = model.initialTurnoverTime == initialTurnoverTime
                 model.reset()
+                let throughputZeroOnReset = throughputIsZero()
                 try await waitUntil { model.isReady && model.stats.step == 0 }
                 let resetAtZero = model.stats.time == 0
+                let throughputZeroAfterReset = throughputIsZero()
                 let beforeBrush = model.stats.enstrophy
+                let resetTurnoverTime = model.initialTurnoverTime
+                let expectedInitialTurnoverTime = 2 * Double.pi / sqrt(2 * Double(beforeBrush))
+                let turnoverMatchesInitialEnstrophy = beforeBrush > 0
+                    && nearlyEqual(resetTurnoverTime, expectedInitialTurnoverTime)
                 model.inject(x: 0.4, y: 0.6, negative: false)
                 try await waitUntil { model.stats.enstrophy != beforeBrush }
                 let brushWhilePaused = model.stats.step == 0
+                let throughputZeroAfterBrush = throughputIsZero()
+                let turnoverFixedAfterBrush = model.initialTurnoverTime == resetTurnoverTime
+                let measuredSimulationTime = pausedSimulationTime - firstSimulationTime
+                let observedSimulationRate = measuredSimulationTime / wallSeconds
+                let observedTurnoverRate = observedSimulationRate / initialTurnoverTime
                 let passed = displayedRate > 0 && pausedStep > firstStep && pauseStable
                     && singleStepDelta == 1 && resetAtZero && brushWhilePaused && model.stats.isFinite
+                    && runningThroughputPositive && turnoverRelationMatches && turnoverFixedWhileAdvancing
+                    && throughputRetainedOnPause && throughputRetainedWhilePaused && turnoverFixedWhilePaused
+                    && throughputRetainedOnSingleStep && throughputRetainedAfterSingleStep && turnoverFixedAfterSingleStep
+                    && throughputZeroOnReset && throughputZeroAfterReset && turnoverMatchesInitialEnstrophy
+                    && throughputZeroAfterBrush && turnoverFixedAfterBrush
+                    && observedSimulationRate.isFinite && observedSimulationRate > 0
                 let report: [String: Any] = [
                     "grid": model.config.gridSize, "preset": model.config.preset.rawValue,
                     "show_every": model.stepsPerFrame,
                     "passed": passed, "displayed_steps_per_second": displayedRate,
+                    "displayed_simulation_time_per_second": displayedSimulationRate,
+                    "displayed_initial_turnovers_per_second": displayedTurnoverRate,
                     "observed_steps_per_second": Double(pausedStep - firstStep) / wallSeconds,
+                    "observed_simulation_time_per_second": observedSimulationRate,
+                    "observed_initial_turnovers_per_second": observedTurnoverRate,
+                    "measured_simulation_time": measuredSimulationTime,
+                    "observation_window": "First published running state to settled pause, including pause settling; separate from the displayed sampling window",
+                    "initial_turnover_time": initialTurnoverTime,
+                    "reset_initial_turnover_time": resetTurnoverTime,
+                    "reset_initial_enstrophy": beforeBrush,
+                    "expected_initial_turnover_time": expectedInitialTurnoverTime,
+                    "running_throughput_positive": runningThroughputPositive,
+                    "turnover_rate_relation_matches": turnoverRelationMatches,
+                    "turnover_fixed_while_advancing": turnoverFixedWhileAdvancing,
+                    "throughput_retained_on_pause": throughputRetainedOnPause,
+                    "throughput_retained_while_paused": throughputRetainedWhilePaused,
+                    "turnover_fixed_while_paused": turnoverFixedWhilePaused,
+                    "throughput_retained_on_single_step": throughputRetainedOnSingleStep,
+                    "throughput_retained_after_single_step": throughputRetainedAfterSingleStep,
+                    "turnover_fixed_after_single_step": turnoverFixedAfterSingleStep,
+                    "throughput_zero_on_reset": throughputZeroOnReset,
+                    "throughput_zero_after_reset": throughputZeroAfterReset,
+                    "turnover_matches_initial_enstrophy": turnoverMatchesInitialEnstrophy,
+                    "throughput_zero_after_brush": throughputZeroAfterBrush,
+                    "turnover_fixed_after_brush": turnoverFixedAfterBrush,
                     "integration_steps": pausedStep - firstStep, "wall_seconds": wallSeconds,
                     "milliseconds_per_step": milliseconds, "pause_stable": pauseStable,
                     "single_step_delta": singleStepDelta, "reset_at_zero": resetAtZero,
