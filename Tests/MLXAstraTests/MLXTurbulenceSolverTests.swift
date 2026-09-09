@@ -90,14 +90,63 @@ final class MLXTurbulenceSolverTests: XCTestCase {
         XCTAssertEqual(a.statistics.step, 0)
     }
 
-    func testDealiasingExcludesBoundaryModeOnGridDivisibleByThree() {
-        let n = 48
-        let configuration = configuration(size: n)
-        let initial = field(size: n) { x, _ in cos(16 * x) + cos(15 * x) + 3 }
-        let expected = field(size: n) { x, _ in cos(15 * x) }
-        let solver = MLXTurbulenceSolver(configuration: configuration, vorticity: initial)
-        XCTAssertLessThan(MLX.max(MLX.abs(solver.snapshot().field[0] - MLXArray(expected, [n, n])))
-            .item(Float.self), 0.00003)
+    func testProjectionRetainsFullBandAndRemovesMeanAndNyquistAxes() {
+        // N = 34 also exercises an odd padded transform size, M = 51.
+        for n in [48, 34] {
+            let half = n / 2
+            let retained: [FourierMode: Double] = [
+                FourierMode(x: half - 1, y: -3): 0.5,
+                FourierMode(x: 1 - half, y: 3): 0.5,
+                FourierMode(x: 2, y: half - 1): 0.375,
+                FourierMode(x: -2, y: 1 - half): 0.375
+            ]
+            var input = retained
+            input[FourierMode(x: 0, y: 0)] = 3
+            input[FourierMode(x: half, y: 2)] = 0.25
+            input[FourierMode(x: -half, y: -2)] = 0.25
+            input[FourierMode(x: 1, y: half)] = 0.125
+            input[FourierMode(x: -1, y: -half)] = 0.125
+            let solver = MLXTurbulenceSolver(configuration: configuration(size: n),
+                                             vorticity: cosineField(input, size: n))
+            let result = solver.snapshot()
+            let expected = MLXArray(cosineField(retained, size: n), [n, n])
+            XCTAssertLessThan(MLX.max(MLX.abs(result.field[0] - expected))
+                .item(Float.self), 0.00001, "N = \(n)")
+            XCTAssertEqual(result.field.shape, [3, n, n])
+        }
+    }
+
+    func testPaddedHighModeAdvectionMatchesIndependentFourierConvolution() {
+        for n in [32, 34] {
+            var configuration = configuration(size: n)
+            configuration.timeScale = 0.8
+            // p + q exceeds the retained x band and must not wrap into a low
+            // mode. p - q = (3, 5) remains resolved and has nonzero advection.
+            // Negative ky tests the placement of the lower half when padding;
+            // unequal |p| and |q| prevent this from being a steady eigenflow.
+            let p = FourierMode(x: n / 2 - 2, y: 3)
+            let q = FourierMode(x: n / 2 - 5, y: -2)
+            let initial: [FourierMode: Double] = [
+                p: 0.5, FourierMode(x: -p.x, y: -p.y): 0.5,
+                q: 0.375, FourierMode(x: -q.x, y: -q.y): 0.375
+            ]
+            let initialField = cosineField(initial, size: n)
+            let solver = MLXTurbulenceSolver(configuration: configuration, vorticity: initialField)
+            let result = solver.advance(configuration: configuration)
+            XCTAssertEqual(result.statistics.time, 0.01, accuracy: 0.00000001)
+
+            // This reference directly convolves normalized Fourier-series
+            // coefficients in Double. It uses neither FFTs nor padding and
+            // therefore independently checks transform scaling and dealiasing.
+            let expectedSpectrum = fourierHeunStep(initial, size: n, dt: result.statistics.time)
+            let expected = MLXArray(cosineField(expectedSpectrum, size: n), [n, n])
+            XCTAssertLessThan(MLX.max(MLX.abs(result.field[0] - expected))
+                .item(Float.self), 0.00001, "N = \(n)")
+            XCTAssertGreaterThan(MLX.max(MLX.abs(expected - MLXArray(initialField, [n, n])))
+                .item(Float.self), 0.0003, "The reference must exercise nonlinear evolution")
+            XCTAssertTrue(result.statistics.isFinite)
+            XCTAssertEqual(result.statistics.step, 1)
+        }
     }
 
     func testPresetsResetDeterministicallyAndRemainFinite() {
@@ -163,5 +212,60 @@ final class MLXTurbulenceSolverTests: XCTestCase {
         let forcingReference = oldForcing.advance(configuration: unchangedForcing, steps: 8)
         XCTAssertGreaterThan(MLX.max(MLX.abs(batch.field - forcingReference.field))
             .item(Float.self), 0.001)
+    }
+
+    private struct FourierMode: Hashable {
+        let x: Int
+        let y: Int
+    }
+
+    // A centrosymmetric cosine field has real Fourier coefficients throughout
+    // this inviscid evolution, so the independent reference needs no complex type.
+    private func cosineField(_ spectrum: [FourierMode: Double], size: Int) -> [Float] {
+        (0..<size * size).map { index in
+            let x = 2 * Double.pi * Double(index % size) / Double(size)
+            let y = 2 * Double.pi * Double(index / size) / Double(size)
+            return Float(spectrum.reduce(0.0) { sum, entry in
+                sum + entry.value * cos(Double(entry.key.x) * x + Double(entry.key.y) * y)
+            })
+        }
+    }
+
+    private func fourierAdvection(_ spectrum: [FourierMode: Double], size: Int) -> [FourierMode: Double] {
+        var result: [FourierMode: Double] = [:]
+        for (p, a) in spectrum {
+            let pSquared = p.x * p.x + p.y * p.y
+            guard pSquared > 0 else { continue }
+            for (q, b) in spectrum {
+                let k = FourierMode(x: p.x + q.x, y: p.y + q.y)
+                guard abs(k.x) < size / 2, abs(k.y) < size / 2,
+                      k.x != 0 || k.y != 0 else { continue }
+                let cross = p.y * q.x - p.x * q.y
+                guard cross != 0 else { continue }
+                result[k, default: 0] += Double(cross) / Double(pSquared) * a * b
+            }
+        }
+        return result
+    }
+
+    private func fourierSum(_ initial: [FourierMode: Double],
+                            _ terms: [(Double, [FourierMode: Double])]) -> [FourierMode: Double] {
+        var result = initial
+        for (scale, spectrum) in terms {
+            for (mode, amplitude) in spectrum {
+                result[mode, default: 0] += scale * amplitude
+            }
+        }
+        return result
+    }
+
+    private func fourierHeunStep(_ initial: [FourierMode: Double], size: Int,
+                                dt: Double) -> [FourierMode: Double] {
+        let a = fourierAdvection(initial, size: size)
+        let stage1 = fourierSum(initial, [(dt / 3, a)])
+        let b = fourierAdvection(stage1, size: size)
+        let stage2 = fourierSum(initial, [(2 * dt / 3, b)])
+        let c = fourierAdvection(stage2, size: size)
+        return fourierSum(initial, [(dt / 4, a), (3 * dt / 4, c)])
     }
 }

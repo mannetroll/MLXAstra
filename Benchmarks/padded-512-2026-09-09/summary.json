@@ -1,0 +1,20 @@
+{
+  "medians": {
+    "metal": {
+      "steps_per_second": 1348.0577595847572,
+      "ms_per_step": 0.7418079773585001
+    },
+    "astra": {
+      "steps_per_second": 444.6763321712431,
+      "ms_per_step": 2.248826680559432
+    }
+  },
+  "metal_over_astra_steps_per_second": 3.0315482566893746,
+  "notes": [
+    "Both runs use 512\u00b2 state and 768\u00b2 nonlinear grids, unforced flow, viscosity approximately 0.00015, and eight steps per batch.",
+    "Integrators, timestep rules, seeds, and initial spectra differ; this is not a matched-trajectory or isolated FFT benchmark.",
+    "Astra excludes the requested warmup steps. Metal's existing headless API has no stepping warmup; initialization and field statistics are untimed.",
+    "Astra includes a field snapshot and GPU-buffer handoff per batch. Metal's headless timing includes no display snapshots.",
+    "Runs are sequential with alternating solver order. Close other GPU workloads before running; this script does not stop other applications."
+  ]
+}

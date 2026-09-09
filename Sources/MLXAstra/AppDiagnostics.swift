@@ -148,6 +148,7 @@ enum AppDiagnostics {
         timings.reserveCapacity(steps)
         var valid = true
         let firstStep = snapshot.statistics.step
+        let firstSimulationTime = snapshot.statistics.time
         var measuredSteps = 0
         let started = ProcessInfo.processInfo.systemUptime
         while measuredSteps < steps {
@@ -173,11 +174,14 @@ enum AppDiagnostics {
         let stats = snapshot.statistics
         let report: [String: Any] = [
             "device": device.name, "grid": configuration.gridSize,
+            "padded_grid": configuration.paddedGridSize, "dealiasing": "three-halves-padding",
             "preset": configuration.preset.rawValue, "steps": measuredSteps, "warmup": warmup,
             "batch_steps": batchSize, "cache_limit_mb": Double(cacheBytes) / 1048576,
             "elapsed_seconds": elapsed, "updates_per_second": Double(steps) / elapsed,
             "mean_ms": elapsed * 1000 / Double(steps), "p95_ms": p95,
             "simulation_time": stats.time, "energy": stats.energy, "enstrophy": stats.enstrophy,
+            "measured_simulation_time": stats.time - firstSimulationTime,
+            "simulation_time_per_second": (stats.time - firstSimulationTime) / elapsed,
             "max_speed": stats.maxSpeed, "finite": valid,
             "mlx_active_mb": Double(Memory.activeMemory) / 1048576,
             "mlx_cache_mb": Double(Memory.cacheMemory) / 1048576,

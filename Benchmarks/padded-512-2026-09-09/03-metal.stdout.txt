@@ -1,0 +1,4 @@
+Metal2DTurbo — decaying, Pao k0=4, Re=6666, CFL=1.5, device=Apple M1 Max
+     N  padded   steps    steps/s    ms/step   simtime/s          dt        E0        L0      E_end      Z_end
+   512     768    3000     1338.5      0.747      2.3800    0.001754    0.4900    1.5550    0.47953      4.657
+wrote /Users/drtobbe/2DComp/mlx_vfft/MLXAstra/Benchmarks/padded-512-2026-09-09/03-metal.csv

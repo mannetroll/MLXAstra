@@ -1,0 +1,14 @@
+[
+  "/private/tmp/MLXAstraDerived/Build/Products/Release/MLXAstra.app/Contents/MacOS/MLXAstra",
+  "--benchmark",
+  "--steps",
+  "3000",
+  "--grid",
+  "512",
+  "--preset",
+  "decaying",
+  "--batch",
+  "8",
+  "--warmup",
+  "30"
+]

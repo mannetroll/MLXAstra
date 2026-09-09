@@ -6,7 +6,7 @@ its vorticity, eddies, and velocity field in an interactive SwiftUI workspace.
 
 ![MLX Astra GUI showing 512 × 512 turbulence in Ember, simulation controls, and live performance statistics](GUI.png)
 
-*512² turbulence in Ember, running on an M1 Max with live controls and simulation statistics.*
+*Earlier 512² turbulence screenshot, before the change to 3/2-padded nonlinear transforms. Its timing is not a measurement of the current solver.*
 
 ## Run
 
@@ -45,6 +45,7 @@ The app opens at **512²** with the **Ember** palette.
 - **Drag** to add a positive vortex; **Option-drag or right-drag** reverses its spin.
 - Adjust brush radius, viscosity, energy injection, time scale, and resolution live.
 - Choose **128², 256², 384², 512², 1024², 2048², or 4096²** grids. A resolution or preset change restarts the flow.
+- Resolution is the state/display size **N**. Nonlinear terms use **(3N/2)²** points: selecting **512²** performs those transforms at **768²**. The field header shows both sizes.
 - **Show every** selects 1, 2, 5, 10, 20, or 50 steps between prepared fields; the default is 10. Batches shorten automatically to keep controls responsive, and display refresh remains independent.
 - **Aurora, Ember, and Glacier** palettes show signed vorticity or speed. Exposure adjusts contrast.
 - **Velocity direction** traces short streamlines through the actual instantaneous velocity field.
@@ -72,11 +73,24 @@ The solver advances the dimensionless vorticity equation on a periodic
 −Δψ = ω,     u = ∂y ψ,     v = −∂x ψ
 ```
 
-Real FFTs recover velocity and vorticity gradients. A strict 2/3 spectral filter
-removes aliased nonlinear modes and the zero mode. A third-order integrating-factor
+Real FFTs recover velocity and vorticity gradients. The state retains all modes
+with `|kx| < N/2` and `|ky| < N/2`, except the zero mode; both Nyquist lines are
+zero. Each nonlinear evaluation zero-pads those coefficients to `M = 3N/2`,
+forms advection on the `M × M` physical grid, then truncates its transform back
+to the retained band. Negative frequencies move to the end of the padded axis.
+Padding scales coefficients by `M²/N²` and truncation by `N²/M²`, preserving
+physical amplitudes with MLX's normalized inverse FFTs. This replaces the former
+2/3 cutoff and matches Metal2DTurbo's retained band and nonlinear grid size.
+A third-order integrating-factor
 Runge–Kutta method handles advection, with exact exponential treatment of viscous
-diffusion. The adaptive CFL bound limits the timestep as velocity or resolution
-increases. Time scale changes the desired timestep; it cannot exceed that bound.
+diffusion. The adaptive CFL bound uses velocity maxima and spacing on the padded
+grid. Time scale changes the desired timestep; it cannot exceed that bound.
+
+Each of the three RK stages uses four inverse real transforms (velocity and
+vorticity gradients) and one forward real transform: **15 M² transforms per
+timestep**. Snapshots add three inverse transforms at N² once per batch. At
+N = 512, the nonlinear transforms are all 768²; Metal2DTurbo uses 12 such
+transforms per timestep with its stress formulation and a different RK method.
 
 Energy injection drives a time-varying small-scale Fourier pattern. Decaying
 turbulence starts with injection disabled; setting injection to zero makes any
@@ -102,8 +116,9 @@ the grid to a Swift array. Frames retain those allocations until rendering compl
 Rendering happens on demand with at most two GPU frames in flight and field updates
 limited to 60 Hz. PNG export performs one explicit image readback.
 
-The reusable allocation cache adapts to resolution: 128 MiB through 512²,
-512 MiB at 1024², 2 GiB at 2048², and 4 GiB at 4096². The limit is also bounded
+The reusable allocation cache scales with the padded grid: 128 MiB through N=256,
+162 MiB at N=384, 288 MiB at N=512, 1,152 MiB at N=1024, and at most 4 GiB for
+larger grids. The limit is also bounded
 by one eighth of physical memory. Live solver allocations are separate from this
 cache, so its limit is not a cap on total GPU memory use.
 
@@ -112,8 +127,10 @@ wall-clock seconds, independently of display refresh. **Solver · ms** shows mea
 time per integration step, amortizing each batch’s field snapshot. Larger grids,
 strong brush impulses, and other GPU workloads can lower the achieved rate.
 
-Measured on this M1 Max in Release, using decaying turbulence and the shipping
-solver plus shared-memory GPU-buffer handoff:
+**Historical measurements of the former 2/3-filtered solver, before padding.**
+These results do not describe the current solver, which transforms larger grids
+and retains a wider spectral band. They were measured on this M1 Max in Release,
+using decaying turbulence plus shared-memory GPU-buffer handoff:
 
 | Grid | Mean step | 95th percentile | Steps/s | Peak active MLX memory |
 | --- | --- | --- | --- | --- |
@@ -137,6 +154,54 @@ use each batch’s amortized time per step. Warmup and the display compositor ar
 excluded. These local measurements describe solver throughput, not displayed frame
 rates; the larger-grid runs are short performance and stability checks.
 
+### Compare the padded solvers
+
+Build both apps in Release, run the numerical tests, and launch the comparison
+from a macOS terminal with Metal access:
+
+```sh
+bash Scripts/build.sh
+bash Scripts/test.sh
+xcodebuild -project ../Metal2DTurbo/Metal2DTurbo.xcodeproj -scheme Metal2DTurbo \
+  -configuration Release -derivedDataPath ../Metal2DTurbo/.build-release build
+python3 Scripts/compare_solvers.py --output-dir /tmp/astra-metal-padded-comparison
+```
+
+The runner alternates three sequential runs per solver, each with 3,000 measured
+steps at **512² state / 768² nonlinear resolution**, batch eight, no forcing,
+and viscosity approximately 0.00015. It writes raw logs, commands, binary hashes,
+and median steps/s and ms/step to the new output directory. It rejects an Astra
+binary that does not report the new padding metadata. Use `--help` for binary
+path and run-length overrides. Close other GPU workloads before measuring.
+
+The comparison matches spatial resolution, but the integrators, initial spectra,
+and CFL rules differ. Astra excludes 30 warmup steps and includes a snapshot per
+batch; Metal's existing headless API has no stepping warmup and excludes display
+snapshots. These are whole-solver measurements, not an isolated MLX-versus-VkFFT
+test.
+
+Measured on the **Apple M1 Max**, Release, September 9, 2026, with the protocol
+above (three runs of 3,000 steps per solver):
+
+| Solver | State / nonlinear grid | Median steps/s | Median ms/step | Steps/s range |
+| --- | --- | ---: | ---: | ---: |
+| Metal2DTurbo | 512² / 768² | 1,348.1 | 0.742 | 1,338.5–1,378.7 |
+| MLXAstra, 3/2 padded | 512² / 768² | 444.7 | 2.249 | 442.6–447.4 |
+
+Metal2DTurbo is **3.03× faster in steps/s** with spatial resolution matched.
+This does not isolate VkFFT's contribution: Astra still performs 15 nonlinear
+transforms per step versus Metal's 12, synchronizes after each step, and uses
+different padding, buffer, and snapshot paths. All eight numerical GPU tests
+passed, including the independent high-mode convolution reference. Astra's peak
+active MLX allocation was about 209.3 MiB in these runs.
+
+The live 512²/768² app check also passed pause, exactly one step, reset, and
+brushing while paused, displaying about 440 steps/s with batch eight. This live
+rate is separate from the headless medians above.
+
+[Raw measurements, commands, binary hashes, and summaries](Benchmarks/padded-512-2026-09-09/)
+are saved with the comparison.
+
 ## Verify
 
 ```sh
@@ -155,12 +220,15 @@ bash Scripts/benchmark.sh --preset vortexDance --steps 240 --export /tmp/astra-v
 The live check opens a test window and exercises batched throughput, pause,
 exactly one step, reset, and brushing while paused through the actual application
 worker. The command above waits for its test instance to close, then prints the
-captured JSON report.
+captured JSON report. If macOS launches the app without presenting its window,
+reopen the same app to present the window and start the check.
 
-The seven numerical tests verify analytic Fourier-mode diffusion, velocity divergence
+The eight numerical tests verify analytic Fourier-mode diffusion, velocity divergence
 and curl, inviscid energy/enstrophy conservation with nontrivial advection, periodic
-vortex injection, strict dealiasing on a grid divisible by three, and deterministic
-finite evolution of every preset. A forced-flow regression also verifies that
+vortex injection, full-band retention with Nyquist removal, and deterministic
+finite evolution of every preset. An independent Double Fourier-convolution
+reference checks high-mode nonlinear alias rejection and normalization, including
+an odd padded grid. A forced-flow regression also verifies that
 batched and single-step evolution agree and that updated controls reach compiled
 GPU steps. GPU tests require access to Metal and should be
 run through Xcode or `Scripts/test.sh`; plain `swift test` is not the build path for
@@ -172,7 +240,8 @@ interactive runner, this benchmark uses the requested batch size without a time
 budget. `--cache-mb` optionally overrides the adaptive cache limit in MiB for
 allocation-cache comparisons. JSON output includes throughput, mean and
 95th-percentile amortized step time, physical diagnostics, and MLX allocation
-statistics. It excludes warmup and does not measure the display compositor.
+statistics, state/padded grid sizes, and measured simulated time per wall-clock
+second. It excludes warmup and does not measure the display compositor.
 `--export` also validates the shipping Metal pipeline and writes a PNG.
 
 ## Source map

@@ -41,7 +41,7 @@ public final class MLXTurbulenceSolver {
     }
 
     /// Initializes a prescribed physical vorticity field, useful for numerical
-    /// experiments. Projection removes its mean and unresolved Fourier modes.
+    /// experiments. Projection removes its mean and the two Nyquist lines.
     public convenience init(configuration: SimulationConfiguration, vorticity: [Float]) {
         self.init(configuration: configuration)
         precondition(vorticity.count == size * size)
@@ -63,12 +63,13 @@ public final class MLXTurbulenceSolver {
         let kx = MLXArray((0..<half).map { Float($0) }, [half, 1])
         let ky = MLXArray((0..<n).map { Float($0 < n / 2 ? $0 : $0 - n) }, [1, n])
         waveSquared = kx * kx + ky * ky
-        // Strict inequality is essential when N is divisible by three: keeping
-        // the boundary modes would let quadratic products alias onto that edge.
+        // The nonlinear products use a separate 3/2-padded grid, so retain the
+        // full N-grid band. Drop both Nyquist lines to keep derivatives and
+        // Hermitian symmetry unambiguous when transferring between grids.
         var retained = [Float](repeating: 0, count: n * half)
         for row in 0..<n {
             let waveY = row < n / 2 ? row : row - n
-            for column in 0..<half where 3 * abs(waveY) < n && 3 * column < n {
+            for column in 0..<half where abs(waveY) < n / 2 && column < n / 2 {
                 if column != 0 || waveY != 0 { retained[column * n + row] = 1 }
             }
         }
@@ -182,16 +183,39 @@ public final class MLXTurbulenceSolver {
         return alongX.transposed(1, 0, 2)
     }
 
+    /// Embed [plane, kx, ky] spectra on the larger transform grid. Negative ky
+    /// modes belong at the end of the padded axis, not next to the positive ones.
+    /// MLX normalizes inverse FFTs by the transform size, so coefficients must
+    /// grow by M²/N² to preserve physical amplitudes after padding.
+    private static func paddedPlanes(_ spectra: MLXArray, size n: Int, paddedSize m: Int) -> MLXArray {
+        let positive = spectra[0..., 0..., 0..<(n / 2)]
+        let negative = spectra[0..., 0..., (n / 2)..<n]
+        let gap = zeros([spectra.dim(0), n / 2 + 1, m - n], dtype: spectra.dtype)
+        let alongY = concatenated([positive, gap, negative], axis: 2)
+        let expanded = padded(alongY, widths: [0, [0, m / 2 - n / 2], 0])
+        return expanded * (Float(m * m) / Float(n * n))
+    }
+
+    /// Return the retained N-grid coefficients of an M-grid real transform.
+    /// The reciprocal padding scale restores the state's N² FFT convention.
+    private static func truncatedSpectrum(_ spectrum: MLXArray, size n: Int,
+                                          paddedSize m: Int) -> MLXArray {
+        let positive = spectrum[0..<(n / 2 + 1), 0..<(n / 2)]
+        let negative = spectrum[0..<(n / 2 + 1), (m - n / 2)..<m]
+        return concatenated([positive, negative], axis: 1) * (Float(n * n) / Float(m * m))
+    }
+
     private func makeCompiledStep(forced: Bool) -> ([MLXArray]) -> [MLXArray] {
         // Capture only immutable operators. Reset creates new closures for the
         // new grid/seed; evolving state and controls are explicit inputs.
         let n = size
+        let m = configuration.paddedGridSize
         let operators = derivatives
         let kSquared = waveSquared
         let projection = mask
         let forceA = forcingA
         let forceB = forcingB
-        let courantNumerator = 0.45 * period / Float(n)
+        let courantNumerator = 0.45 * period / Float(m)
         return MLX.compile { (input: [MLXArray]) -> [MLXArray] in
             let omega = input[0]
             let elapsed = input[1]
@@ -202,11 +226,13 @@ public final class MLXTurbulenceSolver {
             let forcing = input[6]
 
             func physical(_ value: MLXArray) -> MLXArray {
-                Self.inversePlanes(operators * value, size: n)
+                let padded = Self.paddedPlanes(operators * value, size: n, paddedSize: m)
+                return Self.inversePlanes(padded, size: m)
             }
             func nonlinear(_ fields: MLXArray, at time: MLXArray) -> MLXArray {
                 let advection = -(fields[0] * fields[2] + fields[1] * fields[3])
-                var result = rfft2(advection).transposed() * projection
+                let transformed = rfft2(advection).transposed()
+                var result = Self.truncatedSpectrum(transformed, size: n, paddedSize: m) * projection
                 if forced {
                     let phase = time * 0.7
                     result = result + forcing * (cos(phase) * forceA + sin(phase) * forceB)
@@ -214,8 +240,8 @@ public final class MLXTurbulenceSolver {
                 return result
             }
 
-            // The same CFL reduction and cap as before, without a scalar read
-            // and CPU/GPU round trip between the transform and RK stages.
+            // Bound CFL using velocity maxima and spacing on the padded grid.
+            // This stays on the GPU between the transform and RK stages.
             let fields = physical(omega)
             let speed = MLX.max(MLX.abs(fields[0]) + MLX.abs(fields[1]))
             let valid = isFinite(speed)

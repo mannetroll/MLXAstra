@@ -96,7 +96,7 @@ struct AstraView: View {
                         .tracking(1.7)
                 }
                 Spacer()
-                Text("\(model.config.gridSize) × \(model.config.gridSize)")
+                Text("\(model.config.gridSize)² · \(model.config.paddedGridSize)² padded")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(AstraTheme.secondary)
                 Text("PERIODIC")
@@ -350,7 +350,7 @@ struct AstraView: View {
                         .labelsHidden()
                         .frame(width: 116)
                         .controlSize(.small)
-                        .help("Changing resolution restarts the simulation")
+                        .help("State and display use N × N points; nonlinear terms use a 3N/2 × 3N/2 grid. Changing resolution restarts the simulation.")
                     }
                     HStack {
                         Text("Show every").font(.system(size: 12))

@@ -1,0 +1,13 @@
+{
+  "device": "Apple M1 Max",
+  "configuration": "Release",
+  "astra_build_and_tests": "passed",
+  "metal_build": "passed",
+  "numerical_tests": 8,
+  "numerical_failures": 0,
+  "live_check": "passed",
+  "live_check_report": "live-check.json",
+  "live_check_launch_note": "The initial launch did not present a window; a normal reopen event started the self-closing check.",
+  "numerical_test_command": "bash Scripts/test.sh -disableAutomaticPackageResolution -skipPackageUpdates",
+  "comparison_command": "python3 Scripts/compare_solvers.py --output-dir Benchmarks/padded-512-2026-09-09"
+}

@@ -1,0 +1,29 @@
+{
+  "created_utc": "2026-09-09T10:28:01.406898+00:00",
+  "host": "macOS-15.7.9-arm64-arm-64bit-Mach-O",
+  "state_grid": 512,
+  "padded_grid": 768,
+  "batch_steps": 8,
+  "target_viscosity": 0.00015,
+  "runs_per_solver": 3,
+  "timed_steps": 3000,
+  "astra_warmup": 30,
+  "metal_warmup": 0,
+  "notes": [
+    "Both runs use 512\u00b2 state and 768\u00b2 nonlinear grids, unforced flow, viscosity approximately 0.00015, and eight steps per batch.",
+    "Integrators, timestep rules, seeds, and initial spectra differ; this is not a matched-trajectory or isolated FFT benchmark.",
+    "Astra excludes the requested warmup steps. Metal's existing headless API has no stepping warmup; initialization and field statistics are untimed.",
+    "Astra includes a field snapshot and GPU-buffer handoff per batch. Metal's headless timing includes no display snapshots.",
+    "Runs are sequential with alternating solver order. Close other GPU workloads before running; this script does not stop other applications."
+  ],
+  "binaries": {
+    "metal": {
+      "path": "/Users/drtobbe/2DComp/mlx_vfft/Metal2DTurbo/.build-release/Build/Products/Release/Metal2DTurbo.app/Contents/MacOS/Metal2DTurbo",
+      "sha256": "0d74361a6784007fc60c850e744b8febe8c82f8763f1b6f1460d5fa79abc8968"
+    },
+    "astra": {
+      "path": "/private/tmp/MLXAstraDerived/Build/Products/Release/MLXAstra.app/Contents/MacOS/MLXAstra",
+      "sha256": "ddc43723604d36eaec44fdb206c1a1ff9cc612567c6cc351e27d6f826449c435"
+    }
+  }
+}

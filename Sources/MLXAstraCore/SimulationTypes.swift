@@ -54,10 +54,13 @@ public struct SimulationConfiguration: Equatable, Sendable {
     public var timeScale: Float = 1
     public init() {}
 
+    /// Nonlinear products are evaluated here; state and display remain gridSize².
+    public var paddedGridSize: Int { 3 * gridSize / 2 }
+
     /// Reuses freed GPU buffers; this does not limit live solver allocations.
     public var recommendedCacheLimit: Int {
         let mebibyte = 1024 * 1024
-        let desired = max(128 * mebibyte, gridSize * gridSize * 512)
+        let desired = max(128 * mebibyte, paddedGridSize * paddedGridSize * 512)
         let budget = min(4 * 1024 * mebibyte, Int(ProcessInfo.processInfo.physicalMemory / 8))
         return min(desired, budget)
     }

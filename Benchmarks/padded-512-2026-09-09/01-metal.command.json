@@ -1,0 +1,18 @@
+[
+  "/Users/drtobbe/2DComp/mlx_vfft/Metal2DTurbo/.build-release/Build/Products/Release/Metal2DTurbo.app/Contents/MacOS/Metal2DTurbo",
+  "--benchmark",
+  "--steps",
+  "3000",
+  "--resolution",
+  "512",
+  "--reynolds",
+  "6666.666666667",
+  "--k0",
+  "4",
+  "--cfl",
+  "1.5",
+  "--label",
+  "padded-comparison",
+  "--csv",
+  "/Users/drtobbe/2DComp/mlx_vfft/MLXAstra/Benchmarks/padded-512-2026-09-09/01-metal.csv"
+]

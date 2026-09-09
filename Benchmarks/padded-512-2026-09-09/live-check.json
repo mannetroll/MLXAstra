@@ -1,0 +1,15 @@
+{
+  "brush_while_paused" : true,
+  "displayed_steps_per_second" : 440.00157801551302,
+  "grid" : 512,
+  "integration_steps" : 1326,
+  "milliseconds_per_step" : 2.2607433041100324,
+  "observed_steps_per_second" : 419.69529361938481,
+  "passed" : true,
+  "pause_stable" : true,
+  "preset" : "decaying",
+  "reset_at_zero" : true,
+  "show_every" : 8,
+  "single_step_delta" : 1,
+  "wall_seconds" : 3.1594350000086706
+}
