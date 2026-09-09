@@ -17,9 +17,11 @@ its vorticity, eddies, and velocity field in an interactive SwiftUI workspace.
 Requires an Apple silicon Mac, macOS 14 or later, and Xcode with the Metal compiler
 component installed. Built and tested with Xcode 26.3 on an M1 Max.
 Xcode resolves the official [`mlx-swift`](https://github.com/ml-explore/mlx-swift)
-package automatically. Its version is pinned to **0.30.6** for reproducible builds
-with the installed Swift toolchain. First builds need GitHub access and take longer
-while MLX and its Metal shaders compile. No Python runtime, server, model weights,
+package automatically. Its version is pinned to **0.31.4** for reproducible builds
+with the installed Swift toolchain (Swift 6.2.4). This is the latest release whose
+declared tools requirement supports Xcode 26.3; MLX Swift 0.31.5 and 0.31.6
+require Swift 6.3. First builds need GitHub access and take longer while MLX and
+its Metal shaders compile. No Python runtime, server, model weights,
 or additional application is required.
 
 Command-line build and launch:

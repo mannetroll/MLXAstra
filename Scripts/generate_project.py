@@ -25,7 +25,7 @@ def build_file(key, reference, extra=''):
 def phase(key, kind, files, extra=''):
     return add(key, '{ isa = '+kind+'; buildActionMask = 2147483647; files = '+arr(files)+'; runOnlyForDeploymentPostprocessing = 0; '+extra+' }')
 
-package = add('mlx-package', '{ isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/ml-explore/mlx-swift"; requirement = { kind = exactVersion; version = 0.30.6; }; }')
+package = add('mlx-package', '{ isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/ml-explore/mlx-swift"; requirement = { kind = exactVersion; version = 0.31.4; }; }')
 products={}
 for target,kind,ext in [('MLXAstra','wrapper.application','app'),('MLXAstraCore','wrapper.framework','framework'),('MLXAstraTests','wrapper.cfbundle','xctest')]:
     products[target] = add('product-'+target,'{ isa = PBXFileReference; explicitFileType = '+kind+'; includeInIndex = 0; path = '+target+'.'+ext+'; sourceTree = BUILT_PRODUCTS_DIR; }')

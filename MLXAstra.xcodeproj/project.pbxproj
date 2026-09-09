@@ -4,7 +4,7 @@
  classes = {};
  objectVersion = 56;
  objects = {
-  7EE72F071A85C5B6B6E77053 = { isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/ml-explore/mlx-swift"; requirement = { kind = exactVersion; version = 0.30.6; }; };
+  7EE72F071A85C5B6B6E77053 = { isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/ml-explore/mlx-swift"; requirement = { kind = exactVersion; version = 0.31.4; }; };
   1072E9D33C8720BC62F17240 = { isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MLXAstra.app; sourceTree = BUILT_PRODUCTS_DIR; };
   3BA614B7F67F8FB2AC7BAEE6 = { isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = MLXAstraCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
   164B3131A39FA3B1C13F4A84 = { isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MLXAstraTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
